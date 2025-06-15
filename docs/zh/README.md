@@ -1,153 +1,66 @@
-# Telegram Router 文档
+# Telegram Router
 
-## 目录
+一个类似 Gin 风格的 Telegram 机器人路由系统，提供中间件支持和灵活的消息处理。
 
-1. [安装说明](installation.md)
-2. [基本使用](basic-usage.md)
-3. [中间件](middleware.md)
-4. [消息类型](message-types.md)
-5. [回调路由](callback-routing.md)
-6. [高级特性](advanced-features.md)
-7. [示例代码](examples.md)
+## 特性
 
-## 概述
+- 🚀 Gin 风格的路由系统
+- 🔌 支持链式调用的中间件
+- 📝 多种消息类型处理器
+- 🔄 基于上下文（Context）的请求处理
+- ⛓️ 中间件链式执行
+- 🛡️ 支持请求中断
+- 🎯 支持路径参数
+- 🔍 支持查询参数
+- 📊 投票和测验处理
+- 📍 基于位置的路由
+- 📁 文件类型过滤
+- 🌐 支持 Webhook 和长轮询
+- 🔗 支持多种 HTTP 框架集成
 
-Telegram Router 是一个强大的 Telegram 机器人路由系统，灵感来自 Gin Web 框架。它提供了一种灵活直观的方式来处理各种类型的 Telegram 消息和更新。
+## 依赖
 
-### 主要特性
+本项目基于以下开源库构建：
 
-- **Gin 风格路由**：为 Telegram 机器人开发者提供熟悉的路由模式
-- **中间件支持**：支持链式调用多个中间件函数
-- **消息类型处理器**：处理不同类型的消息（文本、命令、媒体等）
-- **基于上下文的处理**：提供丰富的上下文对象和辅助方法
-- **路径参数**：支持动态路由参数
-- **查询参数**：支持 URL 风格的查询参数
-- **投票和测验处理**：专门的投票和测验处理器
-- **基于位置的路由**：支持基于地理位置的路由
-- **文件类型过滤**：过滤和处理特定类型的文件
+- [go-telegram-bot-api](https://github.com/go-telegram-bot-api/telegram-bot-api) - Go 语言的 Telegram Bot API 封装
+  - 许可证：MIT License
+  - 版本：v5.x
 
-### 基本示例
+## 快速链接
 
-```go
-package main
+- [安装指南](installation.md)
+- [基础用法](basic-usage.md)
+- [中间件](middleware.md)
+- [消息类型](message-types.md)
+- [回调路由](callback-routing.md)
+- [高级特性](advanced-features.md)
+- [示例代码](examples.md)
 
-import (
-    tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-    "github.com/yourusername/telegram-router"
-)
+## 许可证
 
-func main() {
-    // 初始化机器人
-    bot, err := tgbotapi.NewBotAPI("你的机器人令牌")
-    if err != nil {
-        panic(err)
-    }
+本项目采用 MIT 许可证 - 详见 [LICENSE](../LICENSE) 文件。
 
-    // 创建路由器
-    router := telegramrouter.NewTelegramRouter(bot)
+### 第三方许可证
 
-    // 添加中间件
-    router.Use(Logger(), Auth([]int64{123456789}))
+- [go-telegram-bot-api](https://github.com/go-telegram-bot-api/telegram-bot-api/blob/master/LICENSE) - MIT License
+- [Gin](https://github.com/gin-gonic/gin/blob/master/LICENSE) - MIT License (用于设计模式参考)
 
-    // 注册处理器
-    router.Command("start", func(c *Context) {
-        c.Reply("欢迎使用机器人！")
-    })
+## 支持项目
 
-    router.Text(func(c *Context) {
-        c.Reply("收到消息：" + c.Message.Text)
-    })
+如果您觉得这个项目有帮助，可以通过以下方式支持：
 
-    // 启动机器人
-    u := tgbotapi.NewUpdate(0)
-    updates := bot.GetUpdatesChan(u)
+**比特币 (BTC) 捐赠：**
 
-    for update := range updates {
-        router.HandleUpdate(&update)
-    }
-}
-```
+<img src="../btc.jpeg" alt="BTC 捐赠二维码" width="220" />
 
-### 支持的消息类型
+*请仅发送比特币到此地址。其他资产可能会永久丢失。*
 
-路由器支持多种消息类型：
+*欢迎通过比特币赞赏扶贫，感谢您的支持！*
+*Support via Bitcoin donation (your contribution also helps support charitable causes).*
 
-- 文本消息
-- 命令
-- 文档
-- 音频
-- 视频
-- 照片
-- 贴纸
-- 位置
-- 联系信息
-- 投票和测验
-- 语音消息
-- 视频笔记
-- 动画
-- 频道消息
+**微信支付 / WeChat Pay：**
 
-### 回调路由
+<img src="../wechat.jpg" alt="微信支付二维码 WeChat Pay QR" width="220" />
 
-支持带路径参数的高级回调路由：
-
-```go
-// 基本回调
-router.Callback("menu/main", func(c *Context) {
-    c.Reply("主菜单")
-})
-
-// 带路径参数
-router.Callback("user/:id/profile", func(c *Context) {
-    userID := c.Param("id")
-    c.Reply(fmt.Sprintf("用户 %s 的个人资料", userID))
-})
-
-// 带查询参数
-router.Callback("products/list", func(c *Context) {
-    page := c.QueryInt("page", 1)
-    sort := c.Query("sort", "id")
-    c.Reply(fmt.Sprintf("第 %d 页，按 %s 排序", page, sort))
-})
-```
-
-### 中间件
-
-链式调用多个中间件函数：
-
-```go
-// 日志中间件
-func Logger() telegramrouter.MiddlewareFunc {
-    return func(c *telegramrouter.Context, next telegramrouter.HandlerFunc) {
-        start := time.Now()
-        next(c)
-        log.Printf("请求处理耗时：%v", time.Since(start))
-    }
-}
-
-// 认证中间件
-func Auth(allowedUsers []int64) telegramrouter.MiddlewareFunc {
-    return func(c *telegramrouter.Context, next telegramrouter.HandlerFunc) {
-        userID := c.Message.From.ID
-        for _, id := range allowedUsers {
-            if id == userID {
-                next(c)
-                return
-            }
-        }
-        c.Reply("未授权的访问")
-        c.Abort()
-    }
-}
-```
-
-### 高级特性
-
-- **基于位置的路由**：根据地理位置路由消息
-- **文件类型过滤**：处理特定类型和大小的文件
-- **投票类型处理**：专门的投票类型处理器
-- **查询参数支持**：回调中的 URL 风格查询参数
-- **请求中断**：停止处理请求链
-- **上下文方法**：丰富的上下文辅助方法
-
-更多详细信息，请参考具体的文档章节。 
+*欢迎通过微信扫码赞赏扶贫，感谢您的支持！*
+*Support via WeChat Pay QR code (for mainland China users; your donation also helps support charitable causes).* 

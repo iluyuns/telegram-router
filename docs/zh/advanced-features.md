@@ -344,4 +344,275 @@ router.Callback("wizard/step", handleCallbackChain)
 
 - 查看[示例代码](examples.md)获取更多灵感
 - 探索[自定义中间件](custom-middleware.md)
-- 了解[性能优化](performance.md)技巧 
+- 了解[性能优化](performance.md)技巧
+
+## Webhook 支持
+
+Telegram Router 支持两种运行模式：长轮询（Long Polling）和 Webhook。Webhook 模式适合生产环境，可以提供更好的性能和可靠性。
+
+### Webhook 配置
+
+```go
+config := router.WebhookConfig{
+    ListenAddr: ":8443",                    // 监听地址
+    CertFile:   "cert.pem",                 // SSL 证书文件路径
+    KeyFile:    "key.pem",                  // SSL 私钥文件路径
+    WebhookURL: "https://example.com:8443/bot", // Webhook URL
+}
+
+// 启动 Webhook 服务器
+if err := r.StartWebhook(config); err != nil {
+    log.Fatal(err)
+}
+```
+
+### 在其他 HTTP 框架中使用
+
+Telegram Router 提供了 `HandleWebhookRequest` 方法，可以在任何 HTTP 框架中使用：
+
+#### Gin 框架
+
+```go
+router := gin.Default()
+router.POST("/bot", func(c *gin.Context) {
+    r.HandleWebhookRequest(c.Writer, c.Request)
+})
+```
+
+#### Echo 框架
+
+```go
+e := echo.New()
+e.POST("/bot", func(c echo.Context) error {
+    r.HandleWebhookRequest(c.Response().Writer, c.Request())
+    return nil
+})
+```
+
+#### 标准库 net/http
+
+```go
+http.HandleFunc("/bot", r.HandleWebhookRequest)
+```
+
+### Webhook 管理
+
+```go
+// 设置 Webhook
+err := r.SetWebhook(config)
+
+// 移除 Webhook
+err = r.RemoveWebhook()
+```
+
+### 注意事项
+
+1. Webhook 模式需要 HTTPS 支持（Telegram 要求）
+2. 生产环境建议使用正式的 SSL 证书
+3. 可以使用 Let's Encrypt 等免费证书服务
+4. 确保服务器防火墙开放相应端口
+5. 建议使用反向代理（如 Nginx）处理 HTTPS
+
+## 消息构建器
+
+Telegram Router 提供了丰富的消息构建器，支持链式调用：
+
+### 文本消息
+
+```go
+builder := c.Reply("Hello, World!")
+builder.WithParseMode("Markdown")
+builder.WithReplyMarkup(keyboard)
+builder.Send()
+```
+
+### 媒体消息
+
+```go
+// 图片
+builder := c.ReplyWithPhotoFilePath("image.jpg")
+builder.WithCaption("图片说明")
+builder.WithParseMode("Markdown")
+builder.Send()
+
+// 文档
+builder := c.ReplyWithDocumentFileURL("https://example.com/doc.pdf", "文档说明")
+builder.Send()
+
+// 音频
+builder := c.ReplyWithAudioFilePath("audio.mp3", "音频说明")
+builder.WithTitle("歌曲标题")
+builder.WithPerformer("艺术家")
+builder.WithDuration(180)
+builder.Send()
+
+// 视频
+builder := c.ReplyWithVideoFilePath("video.mp4", "视频说明")
+builder.WithDuration(60)
+builder.WithSupportsStreaming(true)
+builder.Send()
+```
+
+### 特殊消息
+
+```go
+// 位置
+builder := c.ReplyWithLocation(40.7128, -74.0060)
+builder.Send()
+
+// 地点
+builder := c.ReplyWithVenue(40.7128, -74.0060, "帝国大厦", "纽约第五大道 350 号")
+builder.Send()
+
+// 联系人
+builder := c.ReplyWithContact("+1234567890", "张三", "李")
+builder.Send()
+
+// 投票
+options := []string{"选项 1", "选项 2", "选项 3"}
+builder := c.ReplyWithPoll("你最喜欢什么颜色？", options, true, "regular")
+builder.Send()
+
+// 测验
+options := []string{"红色", "绿色", "蓝色"}
+builder := c.ReplyWithQuiz("天空是什么颜色？", options, 1) // 蓝色是正确答案
+builder.Send()
+```
+
+## 上下文（Context）
+
+Context 提供了丰富的辅助方法：
+
+### 参数获取
+
+```go
+// 路径参数
+userID := c.Param("id")
+
+// 查询参数
+page := c.QueryInt("page", 1)      // 带默认值的整数参数
+sort := c.Query("sort", "id")      // 带默认值的字符串参数
+active := c.QueryBool("active")    // 布尔参数
+```
+
+### 请求控制
+
+```go
+// 中断处理
+c.Abort()
+
+// 检查是否已中断
+if c.IsAborted() {
+    return
+}
+
+// 继续处理
+c.Next()
+```
+
+### 消息回复
+
+```go
+// 文本消息
+c.Reply("Hello, World!")
+
+// 带格式的消息
+c.Reply("*Bold* and _italic_").WithParseMode("Markdown")
+
+// 带键盘的消息
+keyboard := tgbotapi.NewReplyKeyboard(
+    tgbotapi.NewKeyboardButtonRow(
+        tgbotapi.NewKeyboardButton("按钮 1"),
+        tgbotapi.NewKeyboardButton("按钮 2"),
+    ),
+)
+c.Reply("请选择：").WithReplyMarkup(keyboard)
+```
+
+## 中间件链
+
+中间件可以链式调用，支持请求前后的处理：
+
+```go
+// 日志中间件
+func Logger() router.MiddlewareFunc {
+    return func(c *router.Context, next router.HandlerFunc) {
+        start := time.Now()
+        next(c)
+        log.Printf("请求处理耗时：%v", time.Since(start))
+    }
+}
+
+// 认证中间件
+func Auth(allowedUsers []int64) router.MiddlewareFunc {
+    return func(c *router.Context, next router.HandlerFunc) {
+        userID := c.Message.From.ID
+        for _, id := range allowedUsers {
+            if id == userID {
+                next(c)
+                return
+            }
+        }
+        c.Reply("未授权的访问")
+        c.Abort()
+    }
+}
+
+// 使用中间件
+r.Use(Logger(), Auth([]int64{123456789}))
+```
+
+## 位置路由
+
+支持基于地理位置的路由：
+
+```go
+// 处理特定范围内的位置
+r.LocationInRange(40.7, 40.8, -74.0, -73.9, func(c *router.Context) {
+    c.Reply("您位于纽约曼哈顿区域")
+})
+
+// 处理所有位置
+r.Location(func(c *router.Context) {
+    c.Reply(fmt.Sprintf("您的位置：%f, %f", 
+        c.Message.Location.Latitude,
+        c.Message.Location.Longitude))
+})
+```
+
+## 文件类型过滤
+
+支持基于文件类型和大小的过滤：
+
+```go
+// 处理特定类型的文档
+r.DocumentWithType("application/pdf", 10*1024*1024, func(c *router.Context) {
+    c.Reply("收到 PDF 文件，大小不超过 10MB")
+})
+
+// 处理所有文档
+r.Document(func(c *router.Context) {
+    c.Reply(fmt.Sprintf("收到文件：%s", c.Message.Document.FileName))
+})
+```
+
+## 投票处理
+
+支持不同类型的投票和测验：
+
+```go
+// 处理测验
+r.Quiz(func(c *router.Context) {
+    c.Reply("收到测验答案")
+})
+
+// 处理普通投票
+r.RegularPoll(func(c *router.Context) {
+    c.Reply("收到投票")
+})
+
+// 处理特定类型的投票
+r.PollWithType("regular", 10, true, false, func(c *router.Context) {
+    c.Reply("收到匿名投票，最少 10 票，单选")
+})
+``` 

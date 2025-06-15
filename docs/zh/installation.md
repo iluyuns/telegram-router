@@ -1,162 +1,310 @@
-# 安装说明
+# 安装指南
+
+本文档提供了安装和配置 Telegram Router 的详细说明。
 
 ## 系统要求
 
 - Go 1.16 或更高版本
-- Telegram Bot Token（从 [@BotFather](https://t.me/BotFather) 获取）
+- 有效的 Telegram Bot Token（从 [@BotFather](https://t.me/BotFather) 获取）
 
-## 安装步骤
+## 安装
 
-### 1. 创建项目
-
-首先创建一个新的 Go 项目：
+使用 Go 模块安装：
 
 ```bash
-mkdir my-telegram-bot
-cd my-telegram-bot
-go mod init my-telegram-bot
-```
+# 创建新项目
+mkdir my-bot
+cd my-bot
+go mod init my-bot
 
-### 2. 安装依赖
-
-安装 Telegram Router 和必要的依赖：
-
-```bash
+# 安装 Telegram Router
 go get github.com/yourusername/telegram-router
-go get github.com/go-telegram-bot-api/telegram-bot-api/v5
 ```
 
-### 3. 创建机器人
+## 基本配置
 
-1. 在 Telegram 中打开 [@BotFather](https://t.me/BotFather)
-2. 发送 `/newbot` 命令
-3. 按照提示设置机器人名称和用户名
-4. 保存 BotFather 提供的 API Token
-
-### 4. 基本配置
-
-创建一个 `main.go` 文件：
+1. 创建 `main.go` 文件：
 
 ```go
 package main
 
 import (
     "log"
-    tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
     "github.com/yourusername/telegram-router"
+    tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 func main() {
-    // 初始化机器人
-    bot, err := tgbotapi.NewBotAPI("你的机器人令牌")
+    // 创建机器人实例
+    bot, err := tgbotapi.NewBotAPI("YOUR_BOT_TOKEN")
     if err != nil {
         log.Fatal(err)
     }
 
-    // 设置调试模式（可选）
-    bot.Debug = true
-
     // 创建路由器
-    router := telegramrouter.NewTelegramRouter(bot)
+    r := router.New(bot)
 
-    // 注册基本处理器
-    router.Command("start", func(c *telegramrouter.Context) {
+    // 注册命令处理器
+    r.Command("start", func(c *router.Context) {
         c.Reply("欢迎使用机器人！")
     })
 
     // 启动机器人
-    u := tgbotapi.NewUpdate(0)
-    u.Timeout = 60
-
-    updates := bot.GetUpdatesChan(u)
-
-    // 处理更新
-    for update := range updates {
-        router.HandleUpdate(&update)
-    }
+    r.Start()
 }
 ```
 
-### 5. 运行机器人
+2. 运行机器人：
 
 ```bash
 go run main.go
 ```
 
-## 配置说明
+## 配置选项
 
-### 环境变量
-
-建议使用环境变量来存储敏感信息：
+### 长轮询模式
 
 ```go
-// 从环境变量获取令牌
+// 使用默认配置
+r.Start()
+
+// 使用自定义配置
+config := &router.PollingConfig{
+    Timeout: 60,           // 超时时间（秒）
+    DropPendingUpdates: true, // 启动时丢弃待处理更新
+}
+r.StartWithConfig(config)
+```
+
+### Webhook 模式
+
+```go
+// 配置 webhook
+webhook := &router.WebhookConfig{
+    ListenAddr: ":8443",           // 监听地址
+    CertFile:   "cert.pem",        // SSL 证书文件
+    KeyFile:    "key.pem",         // SSL 密钥文件
+    WebhookURL: "https://your-domain.com/bot", // Webhook URL
+}
+
+// 启动 webhook
+if err := r.StartWebhook(webhook); err != nil {
+    log.Fatal(err)
+}
+```
+
+### 中间件配置
+
+```go
+// 添加全局中间件
+r.Use(Logger())
+r.Use(Auth([]int64{123456789}))
+
+// 添加路由特定中间件
+r.Group(func(r *router.Router) {
+    r.Use(Auth([]int64{123456789}))
+    r.Command("admin", func(c *router.Context) {
+        c.Reply("管理员命令")
+    })
+})
+```
+
+## 环境变量
+
+可以通过环境变量配置机器人：
+
+```bash
+# 设置机器人令牌
+export TELEGRAM_BOT_TOKEN="your-bot-token"
+
+# 设置 webhook URL
+export TELEGRAM_WEBHOOK_URL="https://your-domain.com/bot"
+
+# 设置监听地址
+export TELEGRAM_LISTEN_ADDR=":8443"
+```
+
+在代码中使用环境变量：
+
+```go
 token := os.Getenv("TELEGRAM_BOT_TOKEN")
 if token == "" {
     log.Fatal("未设置 TELEGRAM_BOT_TOKEN 环境变量")
 }
-```
 
-### 代理设置（可选）
-
-如果需要使用代理，可以这样配置：
-
-```go
-// 设置代理
-proxyURL, err := url.Parse("http://proxy-server:port")
+bot, err := tgbotapi.NewBotAPI(token)
 if err != nil {
     log.Fatal(err)
 }
-
-transport := &http.Transport{
-    Proxy: http.ProxyURL(proxyURL),
-}
-
-client := &http.Client{Transport: transport}
-bot.Client = client
 ```
 
-### 错误处理
+## 依赖管理
 
-建议添加基本的错误处理：
+### 使用 Go Modules
 
 ```go
-// 错误处理中间件
-func ErrorHandler() telegramrouter.MiddlewareFunc {
-    return func(c *telegramrouter.Context, next telegramrouter.HandlerFunc) {
-        defer func() {
-            if err := recover(); err != nil {
-                log.Printf("发生错误: %v", err)
-                c.Reply("抱歉，处理您的请求时发生错误")
-            }
-        }()
-        next(c)
-    }
-}
+// go.mod
+module my-bot
 
-// 使用错误处理中间件
-router.Use(ErrorHandler())
+go 1.16
+
+require (
+    github.com/yourusername/telegram-router v1.0.0
+    github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.0.0
+)
 ```
 
-## 常见问题
+### 使用 Dep
 
-### 1. 无法连接到 Telegram 服务器
+```bash
+# 安装 dep
+go get -u github.com/golang/dep/cmd/dep
 
-- 检查网络连接
-- 确认 Bot Token 是否正确
-- 如果在中国大陆使用，可能需要配置代理
+# 初始化 dep
+dep init
 
-### 2. 机器人没有响应
+# 添加依赖
+dep ensure -add github.com/yourusername/telegram-router
+```
 
-- 确认机器人是否在线
-- 检查日志输出
-- 验证处理器是否正确注册
+## 开发环境设置
 
-### 3. 更新处理超时
+1. 安装开发工具：
 
-- 调整 `Timeout` 参数
-- 检查处理器是否阻塞
-- 考虑使用 goroutine 处理耗时操作
+```bash
+# 安装 golangci-lint
+go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+# 安装 delve 调试器
+go install github.com/go-delve/delve/cmd/dlv@latest
+```
+
+2. 配置编辑器：
+
+- VS Code：安装 Go 扩展
+- GoLand：使用内置的 Go 工具
+- Vim：安装 vim-go 插件
+
+3. 运行测试：
+
+```bash
+# 运行所有测试
+go test ./...
+
+# 运行特定测试
+go test -v ./... -run TestRouter
+
+# 运行基准测试
+go test -bench=. ./...
+```
+
+## 生产环境部署
+
+### 使用 Docker
+
+1. 创建 Dockerfile：
+
+```dockerfile
+FROM golang:1.16-alpine AS builder
+WORKDIR /app
+COPY . .
+RUN go build -o bot
+
+FROM alpine:latest
+WORKDIR /app
+COPY --from=builder /app/bot .
+COPY cert.pem key.pem ./
+CMD ["./bot"]
+```
+
+2. 构建和运行：
+
+```bash
+# 构建镜像
+docker build -t my-bot .
+
+# 运行容器
+docker run -d \
+    -p 8443:8443 \
+    -v $(pwd)/cert.pem:/app/cert.pem \
+    -v $(pwd)/key.pem:/app/key.pem \
+    -e TELEGRAM_BOT_TOKEN=your-token \
+    my-bot
+```
+
+### 使用 Systemd
+
+1. 创建服务文件 `/etc/systemd/system/telegram-bot.service`：
+
+```ini
+[Unit]
+Description=Telegram Bot Service
+After=network.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/opt/bot
+ExecStart=/opt/bot/bot
+Environment=TELEGRAM_BOT_TOKEN=your-token
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+2. 启用和启动服务：
+
+```bash
+sudo systemctl enable telegram-bot
+sudo systemctl start telegram-bot
+```
+
+## 故障排除
+
+### 常见问题
+
+1. 机器人无法启动
+   - 检查 Bot Token 是否正确
+   - 确保网络连接正常
+   - 查看日志输出
+
+2. Webhook 模式问题
+   - 确保证书有效且未过期
+   - 检查防火墙设置
+   - 验证域名解析正确
+
+3. 中间件问题
+   - 检查中间件顺序
+   - 确保中间件正确返回
+   - 查看错误日志
+
+### 日志记录
+
+```go
+// 配置日志
+log.SetFlags(log.LstdFlags | log.Lshortfile)
+log.SetOutput(os.Stdout)
+
+// 在代码中使用日志
+log.Printf("机器人启动：%s", bot.Self.UserName)
+log.Printf("处理消息：%s", c.Message.Text)
+```
+
+### 调试
+
+```go
+// 启用调试模式
+bot.Debug = true
+
+// 使用 delve 调试
+dlv debug main.go
+
+// 添加调试日志
+if bot.Debug {
+    log.Printf("收到更新：%+v", update)
+}
+```
 
 ## 下一步
 

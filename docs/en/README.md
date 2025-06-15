@@ -1,153 +1,101 @@
-# Telegram Router Documentation
+# Telegram Router
 
-## Table of Contents
+A Gin-style router for Telegram Bot API, providing middleware support and flexible message handling.
 
-1. [Installation](installation.md)
-2. [Basic Usage](basic-usage.md)
-3. [Middleware](middleware.md)
-4. [Message Types](message-types.md)
-5. [Callback Routing](callback-routing.md)
-6. [Advanced Features](advanced-features.md)
-7. [Examples](examples.md)
+## Features
 
-## Overview
+- 🚀 Gin-style routing system
+- 🔌 Middleware support with chain calls
+- 📝 Multiple message type handlers
+- 🔄 Context-based request handling
+- ⛓️ Middleware chain execution
+- 🛡️ Request abortion support
+- 🎯 Path parameter support
+- 🔍 Query parameter support
+- 📊 Poll and quiz handling
+- 📍 Location-based routing
+- 📁 File type filtering
+- 🌐 Webhook support with HTTP framework integration
 
-Telegram Router is a powerful routing system for Telegram bots, inspired by the Gin web framework. It provides a flexible and intuitive way to handle various types of Telegram messages and updates.
+## Dependencies
 
-### Key Features
+This project is built on top of the following open-source libraries:
 
-- **Gin-style Routing**: Familiar routing patterns for Telegram bot developers
-- **Middleware Support**: Chain multiple middleware functions
-- **Message Type Handlers**: Handle different types of messages (text, command, media, etc.)
-- **Context-based Processing**: Rich context object with helper methods
-- **Path Parameters**: Support for dynamic route parameters
-- **Query Parameters**: URL-style query parameter support
-- **Poll & Quiz Handling**: Specialized handlers for polls and quizzes
-- **Location-based Routing**: Route based on geographic location
-- **File Type Filtering**: Filter and handle specific file types
+- [go-telegram-bot-api](https://github.com/go-telegram-bot-api/telegram-bot-api) - Telegram Bot API wrapper for Go
+  - License: MIT License
+  - Version: v5.x
 
-### Basic Example
+## Quick Links
 
-```go
-package main
+- [Installation](installation.md)
+- [Basic Usage](basic-usage.md)
+- [Middleware](middleware.md)
+- [Message Types](message-types.md)
+- [Callback Routing](callback-routing.md)
+- [Advanced Features](advanced-features.md)
+- [Examples](examples.md)
 
-import (
-    tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-    "github.com/yourusername/telegram-router"
-)
+## Features in Detail
 
-func main() {
-    // Initialize bot
-    bot, err := tgbotapi.NewBotAPI("YOUR_BOT_TOKEN")
-    if err != nil {
-        panic(err)
-    }
+### Routing System
+- Command routing with pattern matching
+- Text message routing
+- Callback query routing
+- Location-based routing
+- File type filtering
+- Poll and quiz handling
 
-    // Create router
-    router := telegramrouter.NewTelegramRouter(bot)
+### Middleware Support
+- Chain-style middleware execution
+- Request abortion support
+- Context-based middleware
+- Custom middleware creation
+- Built-in middleware (logging, recovery, etc.)
 
-    // Add middleware
-    router.Use(Logger(), Auth([]int64{123456789}))
+### Message Handling
+- Rich message builder API
+- Support for all Telegram message types
+- File upload handling
+- Media message support
+- Keyboard and inline keyboard support
 
-    // Register handlers
-    router.Command("start", func(c *Context) {
-        c.Reply("Welcome to the bot!")
-    })
+### Webhook Support
+- Both Long Polling and Webhook modes
+- HTTP framework integration (Gin, Echo, net/http)
+- SSL/TLS support
+- Webhook management
+- Production-ready configuration
 
-    router.Text(func(c *Context) {
-        c.Reply("Received: " + c.Message.Text)
-    })
+### Context Features
+- Path parameter support
+- Query parameter support
+- Message builder methods
+- Request control methods
+- Error handling
 
-    // Start bot
-    u := tgbotapi.NewUpdate(0)
-    updates := bot.GetUpdatesChan(u)
+## License
 
-    for update := range updates {
-        router.HandleUpdate(&update)
-    }
-}
-```
+This project is licensed under the MIT License - see the [LICENSE](../../LICENSE) file for details.
 
-### Message Type Support
+### Third-party Licenses
 
-The router supports various message types:
+- [go-telegram-bot-api](https://github.com/go-telegram-bot-api/telegram-bot-api/blob/master/LICENSE) - MIT License
+- [Gin](https://github.com/gin-gonic/gin/blob/master/LICENSE) - MIT License (for inspiration and design patterns)
 
-- Text messages
-- Commands
-- Documents
-- Audio
-- Video
-- Photos
-- Stickers
-- Location
-- Contact
-- Polls and Quizzes
-- Voice messages
-- Video notes
-- Animations
-- Channel posts
+## Support the Project
 
-### Callback Routing
+If you find this project helpful, you can support it via the following ways:
 
-Support for advanced callback routing with path parameters:
+**Bitcoin (BTC) Donation:**
 
-```go
-// Basic callback
-router.Callback("menu/main", func(c *Context) {
-    c.Reply("Main menu")
-})
+<img src="../btc.jpeg" alt="BTC Donation QR" width="220" />
 
-// With path parameters
-router.Callback("user/:id/profile", func(c *Context) {
-    userID := c.Param("id")
-    c.Reply(fmt.Sprintf("User %s's profile", userID))
-})
+*Only send Bitcoin to this address. Other assets may be lost forever.*
 
-// With query parameters
-router.Callback("products/list", func(c *Context) {
-    page := c.QueryInt("page", 1)
-    sort := c.Query("sort", "id")
-    c.Reply(fmt.Sprintf("Page %d, sorted by %s", page, sort))
-})
-```
+*Support via Bitcoin donation (your contribution also helps support charitable causes).*
 
-### Middleware
+**WeChat Pay:**
 
-Chain multiple middleware functions:
+<img src="../wechat.jpg" alt="WeChat Pay QR" width="220" />
 
-```go
-// Logger middleware
-func Logger() telegramrouter.MiddlewareFunc {
-    return func(c *telegramrouter.Context, next telegramrouter.HandlerFunc) {
-        start := time.Now()
-        next(c)
-        log.Printf("Request processed in %v", time.Since(start))
-    }
-}
-
-// Auth middleware
-func Auth(allowedUsers []int64) telegramrouter.MiddlewareFunc {
-    return func(c *telegramrouter.Context, next telegramrouter.HandlerFunc) {
-        userID := c.Message.From.ID
-        for _, id := range allowedUsers {
-            if id == userID {
-                next(c)
-                return
-            }
-        }
-        c.Reply("Unauthorized access")
-        c.Abort()
-    }
-}
-```
-
-### Advanced Features
-
-- **Location-based Routing**: Route messages based on geographic location
-- **File Type Filtering**: Handle specific file types and sizes
-- **Poll Type Handling**: Specialized handlers for different poll types
-- **Query Parameter Support**: URL-style query parameters in callbacks
-- **Request Abortion**: Stop processing the request chain
-- **Context Methods**: Rich set of helper methods in the context
-
-For more detailed information, please refer to the specific documentation sections. 
+*Support via WeChat Pay QR code (for mainland China users; your donation also helps support charitable causes).* 

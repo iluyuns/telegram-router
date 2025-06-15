@@ -344,4 +344,275 @@ router.Callback("wizard/step", handleCallbackChain)
 
 - Check [examples](examples.md) for more inspiration
 - Explore [custom middleware](custom-middleware.md)
-- Learn about [performance optimization](performance.md) techniques 
+- Learn about [performance optimization](performance.md) techniques
+
+## Webhook Support
+
+Telegram Router supports both Long Polling and Webhook modes. Webhook mode is recommended for production environments as it provides better performance and reliability.
+
+### Webhook Configuration
+
+```go
+config := router.WebhookConfig{
+    ListenAddr: ":8443",                    // Listening address
+    CertFile:   "cert.pem",                 // SSL certificate file path
+    KeyFile:    "key.pem",                  // SSL private key file path
+    WebhookURL: "https://example.com:8443/bot", // Webhook URL
+}
+
+// Start Webhook server
+if err := r.StartWebhook(config); err != nil {
+    log.Fatal(err)
+}
+```
+
+### Using with HTTP Frameworks
+
+Telegram Router provides the `HandleWebhookRequest` method that can be used with any HTTP framework:
+
+#### Gin Framework
+
+```go
+router := gin.Default()
+router.POST("/bot", func(c *gin.Context) {
+    r.HandleWebhookRequest(c.Writer, c.Request)
+})
+```
+
+#### Echo Framework
+
+```go
+e := echo.New()
+e.POST("/bot", func(c echo.Context) error {
+    r.HandleWebhookRequest(c.Response().Writer, c.Request())
+    return nil
+})
+```
+
+#### Standard Library net/http
+
+```go
+http.HandleFunc("/bot", r.HandleWebhookRequest)
+```
+
+### Webhook Management
+
+```go
+// Set Webhook
+err := r.SetWebhook(config)
+
+// Remove Webhook
+err = r.RemoveWebhook()
+```
+
+### Important Notes
+
+1. Webhook mode requires HTTPS support (Telegram requirement)
+2. Use official SSL certificates in production
+3. Consider using Let's Encrypt for free SSL certificates
+4. Ensure server firewall allows the required port
+5. Recommended to use a reverse proxy (like Nginx) for HTTPS
+
+## Message Builder
+
+Telegram Router provides a rich message builder API with chain-style calls:
+
+### Text Messages
+
+```go
+builder := c.Reply("Hello, World!")
+builder.WithParseMode("Markdown")
+builder.WithReplyMarkup(keyboard)
+builder.Send()
+```
+
+### Media Messages
+
+```go
+// Photo
+builder := c.ReplyWithPhotoFilePath("image.jpg")
+builder.WithCaption("Image caption")
+builder.WithParseMode("Markdown")
+builder.Send()
+
+// Document
+builder := c.ReplyWithDocumentFileURL("https://example.com/doc.pdf", "Document description")
+builder.Send()
+
+// Audio
+builder := c.ReplyWithAudioFilePath("audio.mp3", "Audio description")
+builder.WithTitle("Song Title")
+builder.WithPerformer("Artist")
+builder.WithDuration(180)
+builder.Send()
+
+// Video
+builder := c.ReplyWithVideoFilePath("video.mp4", "Video description")
+builder.WithDuration(60)
+builder.WithSupportsStreaming(true)
+builder.Send()
+```
+
+### Special Messages
+
+```go
+// Location
+builder := c.ReplyWithLocation(40.7128, -74.0060)
+builder.Send()
+
+// Venue
+builder := c.ReplyWithVenue(40.7128, -74.0060, "Empire State Building", "350 5th Ave, New York")
+builder.Send()
+
+// Contact
+builder := c.ReplyWithContact("+1234567890", "John", "Doe")
+builder.Send()
+
+// Poll
+options := []string{"Option 1", "Option 2", "Option 3"}
+builder := c.ReplyWithPoll("What's your favorite color?", options, true, "regular")
+builder.Send()
+
+// Quiz
+options := []string{"Red", "Green", "Blue"}
+builder := c.ReplyWithQuiz("What color is the sky?", options, 1) // Blue is the correct answer
+builder.Send()
+```
+
+## Context
+
+Context provides rich helper methods:
+
+### Parameter Retrieval
+
+```go
+// Path parameters
+userID := c.Param("id")
+
+// Query parameters
+page := c.QueryInt("page", 1)      // Integer parameter with default
+sort := c.Query("sort", "id")      // String parameter with default
+active := c.QueryBool("active")    // Boolean parameter
+```
+
+### Request Control
+
+```go
+// Abort processing
+c.Abort()
+
+// Check if aborted
+if c.IsAborted() {
+    return
+}
+
+// Continue processing
+c.Next()
+```
+
+### Message Reply
+
+```go
+// Text message
+c.Reply("Hello, World!")
+
+// Formatted message
+c.Reply("*Bold* and _italic_").WithParseMode("Markdown")
+
+// Message with keyboard
+keyboard := tgbotapi.NewReplyKeyboard(
+    tgbotapi.NewKeyboardButtonRow(
+        tgbotapi.NewKeyboardButton("Button 1"),
+        tgbotapi.NewKeyboardButton("Button 2"),
+    ),
+)
+c.Reply("Please select:").WithReplyMarkup(keyboard)
+```
+
+## Middleware Chain
+
+Middleware can be chained and supports pre/post request processing:
+
+```go
+// Logger middleware
+func Logger() router.MiddlewareFunc {
+    return func(c *router.Context, next router.HandlerFunc) {
+        start := time.Now()
+        next(c)
+        log.Printf("Request processed in %v", time.Since(start))
+    }
+}
+
+// Auth middleware
+func Auth(allowedUsers []int64) router.MiddlewareFunc {
+    return func(c *router.Context, next router.HandlerFunc) {
+        userID := c.Message.From.ID
+        for _, id := range allowedUsers {
+            if id == userID {
+                next(c)
+                return
+            }
+        }
+        c.Reply("Unauthorized access")
+        c.Abort()
+    }
+}
+
+// Use middleware
+r.Use(Logger(), Auth([]int64{123456789}))
+```
+
+## Location Routing
+
+Support for location-based routing:
+
+```go
+// Handle location in specific range
+r.LocationInRange(40.7, 40.8, -74.0, -73.9, func(c *router.Context) {
+    c.Reply("You are in Manhattan, New York")
+})
+
+// Handle all locations
+r.Location(func(c *router.Context) {
+    c.Reply(fmt.Sprintf("Your location: %f, %f", 
+        c.Message.Location.Latitude,
+        c.Message.Location.Longitude))
+})
+```
+
+## File Type Filtering
+
+Support for file type and size filtering:
+
+```go
+// Handle specific document type
+r.DocumentWithType("application/pdf", 10*1024*1024, func(c *router.Context) {
+    c.Reply("Received PDF file, size under 10MB")
+})
+
+// Handle all documents
+r.Document(func(c *router.Context) {
+    c.Reply(fmt.Sprintf("Received file: %s", c.Message.Document.FileName))
+})
+```
+
+## Poll Handling
+
+Support for different types of polls and quizzes:
+
+```go
+// Handle quiz
+r.Quiz(func(c *router.Context) {
+    c.Reply("Received quiz answer")
+})
+
+// Handle regular poll
+r.RegularPoll(func(c *router.Context) {
+    c.Reply("Received poll")
+})
+
+// Handle specific poll type
+r.PollWithType("regular", 10, true, false, func(c *router.Context) {
+    c.Reply("Received anonymous poll, minimum 10 votes, single choice")
+})
+``` 

@@ -1,260 +1,289 @@
 # 中间件
 
-中间件是 Telegram Router 的核心特性之一，它允许你在处理请求前后执行自定义逻辑。中间件可以用于日志记录、认证、错误处理等场景。
+Telegram Router 提供了强大的中间件系统，可以轻松实现请求预处理、后处理和错误处理等功能。
 
 ## 基本概念
 
-中间件是一个函数，它接收 `Context` 和下一个处理函数作为参数：
+中间件是一个函数，它接收一个处理函数作为参数，并返回一个新的处理函数。中间件可以：
 
-```go
-type MiddlewareFunc func(*Context, HandlerFunc)
-```
-
-中间件可以：
-1. 在执行处理函数前执行代码
-2. 在执行处理函数后执行代码
-3. 决定是否继续执行处理链
-4. 修改请求上下文
+1. 在执行处理函数之前执行代码
+2. 在执行处理函数之后执行代码
+3. 修改处理函数的执行流程
+4. 处理错误和异常
 
 ## 创建中间件
 
-### 1. 日志中间件
+### 基本中间件
 
 ```go
-func Logger() telegramrouter.MiddlewareFunc {
-    return func(c *telegramrouter.Context, next telegramrouter.HandlerFunc) {
-        // 记录请求开始时间
-        start := time.Now()
-        
-        // 记录请求信息
-        log.Printf("收到请求：%s", c.Message.Text)
-        
-        // 执行下一个处理函数
-        next(c)
-        
-        // 记录处理时间
-        log.Printf("请求处理完成，耗时：%v", time.Since(start))
+// 日志中间件
+func Logger() router.MiddlewareFunc {
+    return func(next router.HandlerFunc) router.HandlerFunc {
+        return func(c *router.Context) {
+            // 处理前
+            start := time.Now()
+            log.Printf("开始处理消息：%s", c.Message.Text)
+
+            // 执行下一个处理器
+            next(c)
+
+            // 处理后
+            log.Printf("处理完成，耗时：%v", time.Since(start))
+        }
     }
 }
+
+// 使用中间件
+r.Use(Logger())
 ```
 
-### 2. 认证中间件
+### 带参数的中间件
 
 ```go
-func Auth(allowedUsers []int64) telegramrouter.MiddlewareFunc {
-    return func(c *telegramrouter.Context, next telegramrouter.HandlerFunc) {
-        // 获取用户 ID
-        userID := c.Message.From.ID
-        
-        // 检查用户是否在允许列表中
-        for _, id := range allowedUsers {
-            if id == userID {
-                next(c)
-                return
+// 认证中间件
+func Auth(allowedUsers []int64) router.MiddlewareFunc {
+    return func(next router.HandlerFunc) router.HandlerFunc {
+        return func(c *router.Context) {
+            userID := c.Message.From.ID
+            for _, id := range allowedUsers {
+                if id == userID {
+                    next(c)
+                    return
+                }
             }
+            c.Reply("未授权访问")
         }
-        
-        // 未授权用户
-        c.Reply("抱歉，您没有权限执行此操作")
-        c.Abort()
-    }
-}
-```
-
-### 3. 错误处理中间件
-
-```go
-func ErrorHandler() telegramrouter.MiddlewareFunc {
-    return func(c *telegramrouter.Context, next telegramrouter.HandlerFunc) {
-        defer func() {
-            if err := recover(); err != nil {
-                // 记录错误
-                log.Printf("发生错误：%v", err)
-                
-                // 发送错误消息
-                c.Reply("抱歉，处理您的请求时发生错误")
-                
-                // 中断处理链
-                c.Abort()
-            }
-        }()
-        
-        next(c)
-    }
-}
-```
-
-### 4. 限流中间件
-
-```go
-func RateLimit(limit int, window time.Duration) telegramrouter.MiddlewareFunc {
-    // 使用 map 存储用户请求计数
-    counters := make(map[int64][]time.Time)
-    var mu sync.Mutex
-    
-    return func(c *telegramrouter.Context, next telegramrouter.HandlerFunc) {
-        userID := c.Message.From.ID
-        
-        mu.Lock()
-        // 清理过期的请求记录
-        now := time.Now()
-        var valid []time.Time
-        for _, t := range counters[userID] {
-            if now.Sub(t) < window {
-                valid = append(valid, t)
-            }
-        }
-        
-        // 检查是否超过限制
-        if len(valid) >= limit {
-            mu.Unlock()
-            c.Reply("请求过于频繁，请稍后再试")
-            c.Abort()
-            return
-        }
-        
-        // 记录新请求
-        counters[userID] = append(valid, now)
-        mu.Unlock()
-        
-        next(c)
-    }
-}
-```
-
-## 使用中间件
-
-### 全局中间件
-
-```go
-// 创建路由器
-router := telegramrouter.NewTelegramRouter(bot)
-
-// 添加全局中间件
-router.Use(Logger())
-router.Use(Auth([]int64{123456789}))
-router.Use(ErrorHandler())
-
-// 链式调用
-router.Use(Logger()).
-    Use(Auth([]int64{123456789})).
-    Use(ErrorHandler())
-
-// 一次添加多个中间件
-router.Use(Logger(), Auth([]int64{123456789}), ErrorHandler())
-```
-
-### 中间件执行顺序
-
-中间件按照注册的顺序执行：
-
-```go
-router.Use(Middleware1())  // 最先执行
-router.Use(Middleware2())  // 第二个执行
-router.Use(Middleware3())  // 最后执行
-
-// 处理函数执行顺序：
-// Middleware1 前 -> Middleware2 前 -> Middleware3 前 -> 
-// 处理函数 -> 
-// Middleware3 后 -> Middleware2 后 -> Middleware1 后
-```
-
-## 高级用法
-
-### 1. 条件中间件
-
-```go
-func ConditionalMiddleware(condition func(*telegramrouter.Context) bool) telegramrouter.MiddlewareFunc {
-    return func(c *telegramrouter.Context, next telegramrouter.HandlerFunc) {
-        if condition(c) {
-            // 满足条件时执行
-            log.Printf("条件满足，用户：%d", c.Message.From.ID)
-        }
-        next(c)
     }
 }
 
-// 使用示例
-router.Use(ConditionalMiddleware(func(c *telegramrouter.Context) bool {
-    return c.Message.From.ID == 123456789
-}))
+// 使用带参数的中间件
+r.Use(Auth([]int64{123456789}))
 ```
 
-### 2. 组合中间件
+### 错误处理中间件
 
 ```go
-func CombineMiddlewares(middlewares ...telegramrouter.MiddlewareFunc) telegramrouter.MiddlewareFunc {
-    return func(c *telegramrouter.Context, next telegramrouter.HandlerFunc) {
-        // 从后向前组合中间件
-        handler := next
-        for i := len(middlewares) - 1; i >= 0; i-- {
-            middleware := middlewares[i]
-            next := handler
-            handler = func(c *telegramrouter.Context) {
-                middleware(c, next)
-            }
+// 错误恢复中间件
+func Recovery() router.MiddlewareFunc {
+    return func(next router.HandlerFunc) router.HandlerFunc {
+        return func(c *router.Context) {
+            defer func() {
+                if err := recover(); err != nil {
+                    log.Printf("发生错误：%v", err)
+                    c.Reply("抱歉，处理您的请求时发生错误")
+                }
+            }()
+            next(c)
         }
-        handler(c)
     }
 }
 
-// 使用示例
-combined := CombineMiddlewares(
+// 使用错误处理中间件
+r.Use(Recovery())
+```
+
+## 中间件链
+
+可以组合多个中间件：
+
+```go
+// 创建中间件链
+r.Use(
     Logger(),
+    Recovery(),
     Auth([]int64{123456789}),
-    ErrorHandler(),
 )
-router.Use(combined)
+
+// 或者使用 Group 创建中间件组
+r.Group(func(r *router.Router) {
+    r.Use(Auth([]int64{123456789}))
+    r.Command("admin", func(c *router.Context) {
+        c.Reply("管理员命令")
+    })
+})
 ```
 
-### 3. 带配置的中间件
+## 常用中间件示例
+
+### 限流中间件
 
 ```go
-type MiddlewareConfig struct {
-    LogLevel    string
-    AllowedUsers []int64
-    RateLimit   int
-    TimeWindow  time.Duration
-}
-
-func ConfigurableMiddleware(config MiddlewareConfig) telegramrouter.MiddlewareFunc {
-    return func(c *telegramrouter.Context, next telegramrouter.HandlerFunc) {
-        // 使用配置参数
-        if config.LogLevel == "debug" {
-            log.Printf("调试信息：%+v", c.Message)
-        }
-        
-        // 检查用户权限
-        userID := c.Message.From.ID
-        for _, id := range config.AllowedUsers {
-            if id == userID {
-                next(c)
+// 限流中间件
+func RateLimit(limit int, window time.Duration) router.MiddlewareFunc {
+    // 使用令牌桶算法
+    limiter := rate.NewLimiter(rate.Every(window/time.Duration(limit)), limit)
+    
+    return func(next router.HandlerFunc) router.HandlerFunc {
+        return func(c *router.Context) {
+            if !limiter.Allow() {
+                c.Reply("请求过于频繁，请稍后再试")
                 return
             }
+            next(c)
         }
-        
-        c.Reply("未授权访问")
-        c.Abort()
     }
 }
 
-// 使用示例
-config := MiddlewareConfig{
-    LogLevel:     "debug",
-    AllowedUsers: []int64{123456789},
-    RateLimit:    10,
-    TimeWindow:   time.Minute,
-}
-router.Use(ConfigurableMiddleware(config))
+// 使用限流中间件
+r.Use(RateLimit(10, time.Minute)) // 每分钟最多 10 条消息
 ```
 
-## 最佳实践
+### 黑名单中间件
 
-1. **保持中间件简单**：每个中间件只负责一个功能
-2. **注意性能影响**：避免在中间件中执行耗时操作
-3. **合理使用 Abort**：只在必要时中断处理链
-4. **错误处理**：确保中间件中的错误被正确处理
-5. **资源清理**：使用 defer 确保资源被正确释放
+```go
+// 黑名单中间件
+func Blacklist(blockedUsers []int64) router.MiddlewareFunc {
+    return func(next router.HandlerFunc) router.HandlerFunc {
+        return func(c *router.Context) {
+            userID := c.Message.From.ID
+            for _, id := range blockedUsers {
+                if id == userID {
+                    c.Reply("您已被禁止使用此机器人")
+                    return
+                }
+            }
+            next(c)
+        }
+    }
+}
+
+// 使用黑名单中间件
+r.Use(Blacklist([]int64{987654321}))
+```
+
+### 消息过滤中间件
+
+```go
+// 消息过滤中间件
+func MessageFilter(filters ...func(*tgbotapi.Message) bool) router.MiddlewareFunc {
+    return func(next router.HandlerFunc) router.HandlerFunc {
+        return func(c *router.Context) {
+            for _, filter := range filters {
+                if !filter(c.Message) {
+                    c.Reply("消息不符合要求")
+                    return
+                }
+            }
+            next(c)
+        }
+    }
+}
+
+// 使用消息过滤中间件
+r.Use(MessageFilter(
+    func(m *tgbotapi.Message) bool { return len(m.Text) > 0 },
+    func(m *tgbotapi.Message) bool { return !strings.Contains(m.Text, "广告") },
+))
+```
+
+### 统计中间件
+
+```go
+// 统计中间件
+func Stats() router.MiddlewareFunc {
+    var (
+        totalMessages int64
+        startTime     = time.Now()
+    )
+
+    return func(next router.HandlerFunc) router.HandlerFunc {
+        return func(c *router.Context) {
+            atomic.AddInt64(&totalMessages, 1)
+            next(c)
+
+            // 每小时输出统计信息
+            if time.Since(startTime) > time.Hour {
+                log.Printf("统计信息：总消息数 %d，运行时间 %v",
+                    atomic.LoadInt64(&totalMessages),
+                    time.Since(startTime))
+            }
+        }
+    }
+}
+
+// 使用统计中间件
+r.Use(Stats())
+```
+
+## 中间件最佳实践
+
+1. 保持中间件简单
+   ```go
+   // 好的做法：每个中间件只做一件事
+   r.Use(Logger())
+   r.Use(Auth([]int64{123456789}))
+   
+   // 避免：一个中间件做多件事
+   r.Use(LoggerAndAuth([]int64{123456789}))
+   ```
+
+2. 正确处理错误
+   ```go
+   // 好的做法：使用 defer 和 recover
+   defer func() {
+       if err := recover(); err != nil {
+           log.Printf("错误：%v", err)
+           c.Reply("发生错误")
+       }
+   }()
+   
+   // 避免：忽略错误
+   next(c) // 可能 panic
+   ```
+
+3. 注意中间件顺序
+   ```go
+   // 好的做法：先处理错误，再处理业务
+   r.Use(Recovery())  // 错误处理
+   r.Use(Logger())    // 日志记录
+   r.Use(Auth(...))   // 认证
+   
+   // 避免：错误处理在最后
+   r.Use(Logger())
+   r.Use(Auth(...))
+   r.Use(Recovery())  // 可能来不及处理错误
+   ```
+
+4. 使用中间件组
+   ```go
+   // 好的做法：使用中间件组管理相关路由
+   r.Group(func(r *router.Router) {
+       r.Use(AdminAuth())
+       r.Command("admin", ...)
+       r.Command("ban", ...)
+   })
+   
+   // 避免：重复中间件
+   r.Command("admin", ...).Use(AdminAuth())
+   r.Command("ban", ...).Use(AdminAuth())
+   ```
+
+5. 性能考虑
+   ```go
+   // 好的做法：使用缓存
+   var userCache = make(map[int64]bool)
+   
+   func CachedAuth() router.MiddlewareFunc {
+       return func(next router.HandlerFunc) router.HandlerFunc {
+           return func(c *router.Context) {
+               if userCache[c.Message.From.ID] {
+                   next(c)
+                   return
+               }
+               // 检查权限并更新缓存
+           }
+       }
+   }
+   
+   // 避免：每次都检查
+   func Auth() router.MiddlewareFunc {
+       return func(next router.HandlerFunc) router.HandlerFunc {
+           return func(c *router.Context) {
+               // 每次都检查权限
+           }
+       }
+   }
+   ```
 
 ## 常见问题
 
