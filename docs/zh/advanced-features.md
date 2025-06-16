@@ -535,31 +535,28 @@ c.Reply("请选择：").WithReplyMarkup(keyboard)
 
 ```go
 // 日志中间件
-func Logger() router.MiddlewareFunc {
-    return func(c *router.Context, next router.HandlerFunc) {
-        start := time.Now()
-        next(c)
-        log.Printf("请求处理耗时：%v", time.Since(start))
-    }
+func Logger(c *router.Context) {
+    start := time.Now()
+    c.Next()
+    log.Printf("请求处理耗时：%v", time.Since(start))
 }
 
 // 认证中间件
-func Auth(allowedUsers []int64) router.MiddlewareFunc {
-    return func(c *router.Context, next router.HandlerFunc) {
+func Auth(allowedUsers []int64) router.HandlerFunc {
+    return func(c *router.Context) {
         userID := c.Message.From.ID
         for _, id := range allowedUsers {
             if id == userID {
-                next(c)
+                c.Next()
                 return
             }
         }
         c.Reply("未授权的访问")
-        c.Abort()
     }
 }
 
 // 使用中间件
-r.Use(Logger(), Auth([]int64{123456789}))
+r.Use(Logger, Auth([]int64{123456789}))
 ```
 
 ## 位置路由

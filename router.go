@@ -20,11 +20,6 @@ import (
 // 每个处理函数接收一个 Context 参数，包含当前更新的上下文信息。
 type HandlerFunc func(*Context)
 
-// MiddlewareFunc 定义中间件函数类型。
-// 中间件函数接收 Context 和下一个处理函数作为参数，
-// 可以在处理请求前后执行自定义逻辑，并控制是否继续执行处理链。
-type MiddlewareFunc func(*Context, HandlerFunc)
-
 // Context 封装了 Telegram 更新的上下文信息。
 // 包含原始更新数据、机器人实例、处理函数链等信息。
 type Context struct {
@@ -37,6 +32,26 @@ type Context struct {
 	query    map[string]string // URL 查询参数
 }
 
+// executeHandler 执行单个处理函数
+func (c *Context) executeHandler(handler HandlerFunc) {
+	if handler != nil && !c.IsAborted() {
+		handler(c)
+	}
+}
+
+// Next 执行处理函数链中的下一个处理函数。
+// 如果处理链已中断或已到达末尾，则不会执行任何操作。
+func (c *Context) Next() {
+	c.index++
+	for c.index < len(c.handlers) {
+		if c.IsAborted() {
+			return
+		}
+		c.executeHandler(c.handlers[c.index])
+		c.index++
+	}
+}
+
 // Reply 创建文本消息构建器
 func (c *Context) Reply(text string) *TextMessageBuilder {
 	if c.Message == nil {
@@ -45,7 +60,7 @@ func (c *Context) Reply(text string) *TextMessageBuilder {
 	msg := tgbotapi.NewMessage(c.Message.Chat.ID, text)
 	msg.ReplyToMessageID = c.Message.MessageID
 	return &TextMessageBuilder{
-		Msg: msg,
+		Msg: &msg,
 		bot: c.Bot,
 	}
 }
@@ -58,7 +73,7 @@ func (c *Context) ReplyWithPhotoFileID(fileID string) *PhotoMessageBuilder {
 	msg := tgbotapi.NewPhoto(c.Message.Chat.ID, tgbotapi.FileID(fileID))
 	msg.ReplyToMessageID = c.Message.MessageID
 	return &PhotoMessageBuilder{
-		Msg: msg,
+		Msg: &msg,
 		bot: c.Bot,
 	}
 }
@@ -71,7 +86,7 @@ func (c *Context) ReplyWithPhotoFileURL(url string) *PhotoMessageBuilder {
 	msg := tgbotapi.NewPhoto(c.Message.Chat.ID, tgbotapi.FileURL(url))
 	msg.ReplyToMessageID = c.Message.MessageID
 	return &PhotoMessageBuilder{
-		Msg: msg,
+		Msg: &msg,
 		bot: c.Bot,
 	}
 }
@@ -87,7 +102,7 @@ func (c *Context) ReplyWithPhotoFileBytes(data []byte) *PhotoMessageBuilder {
 	})
 	msg.ReplyToMessageID = c.Message.MessageID
 	return &PhotoMessageBuilder{
-		Msg: msg,
+		Msg: &msg,
 		bot: c.Bot,
 	}
 }
@@ -100,7 +115,7 @@ func (c *Context) ReplyWithPhotoFilePath(path string) *PhotoMessageBuilder {
 	msg := tgbotapi.NewPhoto(c.Message.Chat.ID, tgbotapi.FilePath(path))
 	msg.ReplyToMessageID = c.Message.MessageID
 	return &PhotoMessageBuilder{
-		Msg: msg,
+		Msg: &msg,
 		bot: c.Bot,
 	}
 }
@@ -116,23 +131,25 @@ func (c *Context) ReplyWithPhotoFileReader(reader io.Reader) *PhotoMessageBuilde
 	})
 	msg.ReplyToMessageID = c.Message.MessageID
 	return &PhotoMessageBuilder{
-		Msg: msg,
+		Msg: &msg,
 		bot: c.Bot,
 	}
 }
 
 // ReplyWithDocumentFileID 通过文件ID发送文档
-func (c *Context) ReplyWithDocumentFileID(fileID string, caption string) error {
+func (c *Context) ReplyWithDocumentFileID(fileID string, caption string) *DocumentMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewDocument(c.Message.Chat.ID, tgbotapi.FileID(fileID))
 	msg.ReplyToMessageID = c.Message.MessageID
 	if caption != "" {
 		msg.Caption = caption
 	}
-	_, err := c.Bot.Send(msg)
-	return err
+	return &DocumentMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithDocumentFileURL 通过URL发送文档
@@ -146,15 +163,15 @@ func (c *Context) ReplyWithDocumentFileURL(url string, caption string) *Document
 		msg.Caption = caption
 	}
 	return &DocumentMessageBuilder{
-		Msg: msg,
+		Msg: &msg,
 		bot: c.Bot,
 	}
 }
 
 // ReplyWithDocumentFileBytes 通过字节数据发送文档
-func (c *Context) ReplyWithDocumentFileBytes(data []byte, caption string) error {
+func (c *Context) ReplyWithDocumentFileBytes(data []byte, caption string) *DocumentMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewDocument(c.Message.Chat.ID, tgbotapi.FileBytes{
 		Name:  "document",
@@ -164,8 +181,10 @@ func (c *Context) ReplyWithDocumentFileBytes(data []byte, caption string) error 
 	if caption != "" {
 		msg.Caption = caption
 	}
-	_, err := c.Bot.Send(msg)
-	return err
+	return &DocumentMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithDocumentFilePath 通过文件路径发送文档
@@ -183,9 +202,9 @@ func (c *Context) ReplyWithDocumentFilePath(path string, caption string) error {
 }
 
 // ReplyWithDocumentFileReader 通过io.Reader发送文档
-func (c *Context) ReplyWithDocumentFileReader(reader io.Reader, caption string) error {
+func (c *Context) ReplyWithDocumentFileReader(reader io.Reader, caption string) *DocumentMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewDocument(c.Message.Chat.ID, tgbotapi.FileReader{
 		Name:   "document",
@@ -195,42 +214,48 @@ func (c *Context) ReplyWithDocumentFileReader(reader io.Reader, caption string) 
 	if caption != "" {
 		msg.Caption = caption
 	}
-	_, err := c.Bot.Send(msg)
-	return err
+	return &DocumentMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithAudioFileID 通过文件ID发送音频
-func (c *Context) ReplyWithAudioFileID(fileID string, caption string) error {
+func (c *Context) ReplyWithAudioFileID(fileID string, caption string) *AudioMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewAudio(c.Message.Chat.ID, tgbotapi.FileID(fileID))
 	msg.ReplyToMessageID = c.Message.MessageID
 	if caption != "" {
 		msg.Caption = caption
 	}
-	_, err := c.Bot.Send(msg)
-	return err
+	return &AudioMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithAudioFileURL 通过URL发送音频
-func (c *Context) ReplyWithAudioFileURL(url string, caption string) error {
+func (c *Context) ReplyWithAudioFileURL(url string, caption string) *AudioMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewAudio(c.Message.Chat.ID, tgbotapi.FileURL(url))
 	msg.ReplyToMessageID = c.Message.MessageID
 	if caption != "" {
 		msg.Caption = caption
 	}
-	_, err := c.Bot.Send(msg)
-	return err
+	return &AudioMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithAudioFileBytes 通过字节数据发送音频
-func (c *Context) ReplyWithAudioFileBytes(data []byte, caption string) error {
+func (c *Context) ReplyWithAudioFileBytes(data []byte, caption string) *AudioMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewAudio(c.Message.Chat.ID, tgbotapi.FileBytes{
 		Name:  "audio.mp3",
@@ -240,8 +265,10 @@ func (c *Context) ReplyWithAudioFileBytes(data []byte, caption string) error {
 	if caption != "" {
 		msg.Caption = caption
 	}
-	_, err := c.Bot.Send(msg)
-	return err
+	return &AudioMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithAudioFilePath 通过文件路径发送音频
@@ -255,15 +282,15 @@ func (c *Context) ReplyWithAudioFilePath(path string, caption string) *AudioMess
 		msg.Caption = caption
 	}
 	return &AudioMessageBuilder{
-		Msg: msg,
+		Msg: &msg,
 		bot: c.Bot,
 	}
 }
 
 // ReplyWithAudioFileReader 通过io.Reader发送音频
-func (c *Context) ReplyWithAudioFileReader(reader io.Reader, caption string) error {
+func (c *Context) ReplyWithAudioFileReader(reader io.Reader, caption string) *AudioMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewAudio(c.Message.Chat.ID, tgbotapi.FileReader{
 		Name:   "audio.mp3",
@@ -273,42 +300,48 @@ func (c *Context) ReplyWithAudioFileReader(reader io.Reader, caption string) err
 	if caption != "" {
 		msg.Caption = caption
 	}
-	_, err := c.Bot.Send(msg)
-	return err
+	return &AudioMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithVideoFileID 通过文件ID发送视频
-func (c *Context) ReplyWithVideoFileID(fileID string, caption string) error {
+func (c *Context) ReplyWithVideoFileID(fileID string, caption string) *VideoMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewVideo(c.Message.Chat.ID, tgbotapi.FileID(fileID))
 	msg.ReplyToMessageID = c.Message.MessageID
 	if caption != "" {
 		msg.Caption = caption
 	}
-	_, err := c.Bot.Send(msg)
-	return err
+	return &VideoMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithVideoFileURL 通过URL发送视频
-func (c *Context) ReplyWithVideoFileURL(url string, caption string) error {
+func (c *Context) ReplyWithVideoFileURL(url string, caption string) *VideoMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewVideo(c.Message.Chat.ID, tgbotapi.FileURL(url))
 	msg.ReplyToMessageID = c.Message.MessageID
 	if caption != "" {
 		msg.Caption = caption
 	}
-	_, err := c.Bot.Send(msg)
-	return err
+	return &VideoMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithVideoFileBytes 通过字节数据发送视频
-func (c *Context) ReplyWithVideoFileBytes(data []byte, caption string) error {
+func (c *Context) ReplyWithVideoFileBytes(data []byte, caption string) *VideoMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewVideo(c.Message.Chat.ID, tgbotapi.FileBytes{
 		Name:  "video.mp4",
@@ -318,8 +351,10 @@ func (c *Context) ReplyWithVideoFileBytes(data []byte, caption string) error {
 	if caption != "" {
 		msg.Caption = caption
 	}
-	_, err := c.Bot.Send(msg)
-	return err
+	return &VideoMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithVideoFilePath 通过文件路径发送视频
@@ -333,15 +368,15 @@ func (c *Context) ReplyWithVideoFilePath(path string, caption string) *VideoMess
 		msg.Caption = caption
 	}
 	return &VideoMessageBuilder{
-		Msg: msg,
+		Msg: &msg,
 		bot: c.Bot,
 	}
 }
 
 // ReplyWithVideoFileReader 通过io.Reader发送视频
-func (c *Context) ReplyWithVideoFileReader(reader io.Reader, caption string) error {
+func (c *Context) ReplyWithVideoFileReader(reader io.Reader, caption string) *VideoMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewVideo(c.Message.Chat.ID, tgbotapi.FileReader{
 		Name:   "video.mp4",
@@ -351,44 +386,52 @@ func (c *Context) ReplyWithVideoFileReader(reader io.Reader, caption string) err
 	if caption != "" {
 		msg.Caption = caption
 	}
-	_, err := c.Bot.Send(msg)
-	return err
+	return &VideoMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithVoiceFileID 通过文件ID发送语音
-func (c *Context) ReplyWithVoiceFileID(fileID string) error {
+func (c *Context) ReplyWithVoiceFileID(fileID string) *VoiceMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewVoice(c.Message.Chat.ID, tgbotapi.FileID(fileID))
 	msg.ReplyToMessageID = c.Message.MessageID
-	_, err := c.Bot.Send(msg)
-	return err
+	return &VoiceMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithVoiceFileURL 通过URL发送语音
-func (c *Context) ReplyWithVoiceFileURL(url string) error {
+func (c *Context) ReplyWithVoiceFileURL(url string) *VoiceMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewVoice(c.Message.Chat.ID, tgbotapi.FileURL(url))
 	msg.ReplyToMessageID = c.Message.MessageID
-	_, err := c.Bot.Send(msg)
-	return err
+	return &VoiceMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithVoiceFileBytes 通过字节数据发送语音
-func (c *Context) ReplyWithVoiceFileBytes(data []byte) error {
+func (c *Context) ReplyWithVoiceFileBytes(data []byte) *VoiceMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewVoice(c.Message.Chat.ID, tgbotapi.FileBytes{
 		Name:  "voice.ogg",
 		Bytes: data,
 	})
 	msg.ReplyToMessageID = c.Message.MessageID
-	_, err := c.Bot.Send(msg)
-	return err
+	return &VoiceMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithVoiceFilePath 通过文件路径发送语音
@@ -399,23 +442,25 @@ func (c *Context) ReplyWithVoiceFilePath(path string) *VoiceMessageBuilder {
 	msg := tgbotapi.NewVoice(c.Message.Chat.ID, tgbotapi.FilePath(path))
 	msg.ReplyToMessageID = c.Message.MessageID
 	return &VoiceMessageBuilder{
-		Msg: msg,
+		Msg: &msg,
 		bot: c.Bot,
 	}
 }
 
 // ReplyWithVoiceFileReader 通过io.Reader发送语音
-func (c *Context) ReplyWithVoiceFileReader(reader io.Reader) error {
+func (c *Context) ReplyWithVoiceFileReader(reader io.Reader) *VoiceMessageBuilder {
 	if c.Message == nil {
-		return fmt.Errorf("no message to reply to")
+		return nil
 	}
 	msg := tgbotapi.NewVoice(c.Message.Chat.ID, tgbotapi.FileReader{
 		Name:   "voice.ogg",
 		Reader: reader,
 	})
 	msg.ReplyToMessageID = c.Message.MessageID
-	_, err := c.Bot.Send(msg)
-	return err
+	return &VoiceMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
 }
 
 // ReplyWithVideoNoteFileID 通过文件ID发送视频笔记
@@ -538,18 +583,6 @@ func (c *Context) ReplyWithStickerFileReader(reader io.Reader) error {
 	msg.ReplyToMessageID = c.Message.MessageID
 	_, err := c.Bot.Send(msg)
 	return err
-}
-
-// Next 执行处理函数链中的下一个处理函数。
-// 如果处理链已中断或已到达末尾，则不会执行任何操作。
-func (c *Context) Next() {
-	if c.aborted {
-		return
-	}
-	c.index++
-	if c.index < len(c.handlers) {
-		c.handlers[c.index](c)
-	}
 }
 
 // Abort 中断处理函数链的执行。
@@ -698,7 +731,7 @@ type WebhookConfig struct {
 type TelegramRouter struct {
 	Bot *tgbotapi.BotAPI
 	// 全局中间件，按注册顺序执行
-	middlewares []MiddlewareFunc
+	middlewares []HandlerFunc
 	// 文本消息处理器
 	textHandlers []HandlerFunc
 	// 命令处理器
@@ -745,6 +778,27 @@ type TelegramRouter struct {
 	documentTypeHandlers map[FileType][]HandlerFunc
 	// 回调路由处理器
 	callbackRoutes []*CallbackRoute
+	// 群组相关处理器
+	groupChatCreatedHandler      HandlerFunc
+	supergroupChatCreatedHandler HandlerFunc
+	channelChatCreatedHandler    HandlerFunc
+	newChatMembersHandler        HandlerFunc
+	leftChatMemberHandler        HandlerFunc
+	newChatTitleHandler          HandlerFunc
+	newChatPhotoHandler          HandlerFunc
+	deleteChatPhotoHandler       HandlerFunc
+	editedMessageHandler         HandlerFunc
+	editedChannelPostHandler     HandlerFunc
+	myChatMemberHandler          HandlerFunc
+	chatMemberHandler            HandlerFunc
+	pollAnswerHandler            HandlerFunc
+	preCheckoutQueryHandler      HandlerFunc
+	shippingQueryHandler         HandlerFunc
+	successfulPaymentHandler     HandlerFunc
+	// 添加通用处理器字段
+	messageHandlers []HandlerFunc
+	// 重命名为 updateHandlers
+	updateHandlers []HandlerFunc
 }
 
 // NewTelegramRouter 创建一个新的 Telegram 路由器实例。
@@ -765,222 +819,222 @@ func NewTelegramRouter(bot *tgbotapi.BotAPI) *TelegramRouter {
 //
 // 示例:
 //
-//	router.Use(Logger()).
+//	router.Use(Logger).
 //	    Use(Auth([]int64{123456789})).
-//	    Use(Recovery())
+//	    Use(Recovery)
 //
 // 或者:
 //
-//	router.Use(Logger(), Auth([]int64{123456789}), Recovery())
-func (t *TelegramRouter) Use(middlewares ...MiddlewareFunc) *TelegramRouter {
+//	router.Use(Logger, Auth([]int64{123456789}), Recovery)
+func (t *TelegramRouter) Use(middlewares ...HandlerFunc) *TelegramRouter {
 	t.middlewares = append(t.middlewares, middlewares...)
 	return t
 }
 
 // Command 注册命令处理函数。
-// 参数 command 是命令名称（不含 / 前缀），handler 是处理函数。
-// 当收到对应的命令消息时，将执行注册的处理函数。
-//
-// 示例:
-//
-//	router.Command("start", func(c *Context) {
-//	    c.Reply("欢迎使用机器人！")
-//	})
-func (t *TelegramRouter) Command(command string, handler HandlerFunc) {
-	t.commandHandlers[command] = handler
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) Command(command string, handlers ...HandlerFunc) {
+	t.commandHandlers[command] = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
 }
 
 // Text 注册文本消息处理函数。
-// 当收到文本消息时，将执行所有注册的处理函数，直到被中断。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 //
 // 示例:
 //
-//	router.Text(func(c *Context) {
-//	    c.Reply("收到文本消息：" + c.Message.Text)
-//	})
-func (t *TelegramRouter) Text(handler HandlerFunc) {
-	t.textHandlers = append(t.textHandlers, handler)
-}
-
-// Document 注册文档消息处理函数。
-// 当收到文档消息时，将执行所有注册的处理函数，直到被中断。
-//
-// 示例:
-//
-//	router.Document(func(c *Context) {
-//	    doc := c.Message.Document
-//	    c.Reply(fmt.Sprintf("收到文件：%s", doc.FileName))
-//	})
-func (t *TelegramRouter) Document(handler HandlerFunc) {
-	t.documentHandlers = append(t.documentHandlers, handler)
-}
-
-// Audio 注册音频消息处理函数。
-// 当收到音频消息时，将执行所有注册的处理函数，直到被中断。
-//
-// 示例:
-//
-//	router.Audio(func(c *Context) {
-//	    audio := c.Message.Audio
-//	    c.Reply(fmt.Sprintf("收到音频：%s", audio.Title))
-//	})
-func (t *TelegramRouter) Audio(handler HandlerFunc) {
-	t.audioHandlers = append(t.audioHandlers, handler)
-}
-
-// Video 注册视频消息处理函数。
-// 当收到视频消息时，将执行所有注册的处理函数，直到被中断。
-//
-// 示例:
-//
-//	router.Video(func(c *Context) {
-//	    video := c.Message.Video
-//	    c.Reply(fmt.Sprintf("收到视频：%dx%d", video.Width, video.Height))
-//	})
-func (t *TelegramRouter) Video(handler HandlerFunc) {
-	t.videoHandlers = append(t.videoHandlers, handler)
-}
-
-// Photo 注册照片消息处理函数。
-// 当收到照片消息时，将执行所有注册的处理函数，直到被中断。
-//
-// 示例:
-//
-//	router.Photo(func(c *Context) {
-//	    photo := c.Message.Photo[len(c.Message.Photo)-1]
-//	    c.Reply(fmt.Sprintf("收到照片：%dx%d", photo.Width, photo.Height))
-//	})
-func (t *TelegramRouter) Photo(handler HandlerFunc) {
-	t.photoHandlers = append(t.photoHandlers, handler)
-}
-
-// Sticker 注册贴纸消息处理函数。
-// 当收到贴纸消息时，将执行所有注册的处理函数，直到被中断。
-//
-// 示例:
-//
-//	router.Sticker(func(c *Context) {
-//	    sticker := c.Message.Sticker
-//	    c.Reply(fmt.Sprintf("收到贴纸：%s", sticker.Emoji))
-//	})
-func (t *TelegramRouter) Sticker(handler HandlerFunc) {
-	t.stickerHandlers = append(t.stickerHandlers, handler)
-}
-
-// Callback 注册回调查询处理器
-// pattern 支持以下格式：
-// - 静态路径：如 "menu/main"
-// - 参数路径：如 "user/:id/profile"
-// - 通配符：如 "action/*"
-func (t *TelegramRouter) Callback(pattern string, handler HandlerFunc) {
-	paramNames := make([]string, 0)
-
-	// 处理参数和通配符
-	parts := strings.Split(pattern, "/")
-	for i, part := range parts {
-		if strings.HasPrefix(part, ":") {
-			// 参数匹配，如 :id
-			paramName := part[1:]
-			paramNames = append(paramNames, paramName)
-			parts[i] = "([^/]+)"
-		} else if part == "*" {
-			// 通配符匹配
-			parts[i] = ".*"
-		}
-	}
-
-	regexPattern := "^" + strings.Join(parts, "/") + "$"
-	regex := regexp.MustCompile(regexPattern)
-
-	route := &CallbackRoute{
-		pattern: pattern,
-		handler: handler,
-		params:  paramNames,
-		regex:   regex,
-	}
-
-	t.callbackRoutes = append(t.callbackRoutes, route)
-}
-
-// Location 注册位置消息处理器
-func (t *TelegramRouter) Location(handler HandlerFunc) {
-	t.locationHandlers = append(t.locationHandlers, handler)
-}
-
-// Contact 注册联系信息处理器
-func (t *TelegramRouter) Contact(handler HandlerFunc) {
-	t.contactHandlers = append(t.contactHandlers, handler)
-}
-
-// Poll 注册轮询处理器
-func (t *TelegramRouter) Poll(handler HandlerFunc) {
-	t.pollHandlers = append(t.pollHandlers, handler)
-}
-
-// PollWithType 注册轮询类型处理器
-// 当轮询类型和条件符合要求时触发
-func (t *TelegramRouter) PollWithType(pollType string, minVotes int, isAnonymous, allowMultiple bool, handler HandlerFunc) {
-	t.Poll(func(c *Context) {
-		poll := c.Message.Poll
-		if poll == nil {
-			return
-		}
-
-		// 检查类型匹配
-		typeMatch := pollType == "" || poll.Type == pollType
-		// 检查投票数
-		votesMatch := minVotes == 0 || poll.TotalVoterCount >= minVotes
-		// 检查匿名设置
-		anonymousMatch := poll.IsAnonymous == isAnonymous
-		// 检查多选设置（仅对 regular 类型有效）
-		multipleMatch := poll.Type != "regular" || poll.AllowsMultipleAnswers == allowMultiple
-
-		if typeMatch && votesMatch && anonymousMatch && multipleMatch {
-			handler(c)
-		}
+//	router.Text(
+//	    func(c *Context) { c.Reply("收到文本消息：" + c.Message.Text) },
+//	    func(c *Context) { log.Printf("用户 %d 发送了消息", c.Message.From.ID) },
+//	)
+func (t *TelegramRouter) Text(handlers ...HandlerFunc) {
+	t.textHandlers = append(t.textHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
 	})
 }
 
-// Quiz 注册测验处理器
-// 处理 quiz 类型的轮询（测验）
-func (t *TelegramRouter) Quiz(handler HandlerFunc) {
-	t.quizHandlers = append(t.quizHandlers, handler)
+// Document 注册文档消息处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) Document(handlers ...HandlerFunc) {
+	t.documentHandlers = append(t.documentHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
 }
 
-// RegularPoll 注册普通投票处理器
-// 处理 regular 类型的轮询（普通投票）
-func (t *TelegramRouter) RegularPoll(handler HandlerFunc) {
-	t.regularPollHandlers = append(t.regularPollHandlers, handler)
+// Audio 注册音频消息处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) Audio(handlers ...HandlerFunc) {
+	t.audioHandlers = append(t.audioHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
 }
 
-// Game 注册游戏处理器
-func (t *TelegramRouter) Game(handler HandlerFunc) {
-	t.gameHandlers = append(t.gameHandlers, handler)
+// Video 注册视频消息处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) Video(handlers ...HandlerFunc) {
+	t.videoHandlers = append(t.videoHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
 }
 
-// Voice 注册语音消息处理器
-func (t *TelegramRouter) Voice(handler HandlerFunc) {
-	t.voiceHandlers = append(t.voiceHandlers, handler)
+// Photo 注册照片消息处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) Photo(handlers ...HandlerFunc) {
+	t.photoHandlers = append(t.photoHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
 }
 
-// VideoNote 注册视频笔记处理器
-func (t *TelegramRouter) VideoNote(handler HandlerFunc) {
-	t.videoNoteHandlers = append(t.videoNoteHandlers, handler)
+// Sticker 注册贴纸消息处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) Sticker(handlers ...HandlerFunc) {
+	t.stickerHandlers = append(t.stickerHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
 }
 
-// Animation 注册动画处理器
-func (t *TelegramRouter) Animation(handler HandlerFunc) {
-	t.animationHandlers = append(t.animationHandlers, handler)
+// Callback 注册回调查询处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) Callback(pattern string, handlers ...HandlerFunc) {
+	t.callbackRoutes = append(t.callbackRoutes, &CallbackRoute{
+		pattern: pattern,
+		handler: func(c *Context) {
+			c.handlers = handlers
+			c.index = -1
+			c.Next()
+		},
+		params: parseRouteParams(pattern),
+		regex:  compileRoutePattern(pattern),
+	})
 }
 
-// LiveLocation 注册位置共享处理器
-func (t *TelegramRouter) LiveLocation(handler HandlerFunc) {
-	t.liveLocationHandlers = append(t.liveLocationHandlers, handler)
+// Location 注册位置消息处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) Location(handlers ...HandlerFunc) {
+	t.locationHandlers = append(t.locationHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
 }
 
-// ChannelPost 注册群组/频道消息处理器
-func (t *TelegramRouter) ChannelPost(handler HandlerFunc) {
-	t.channelPostHandlers = append(t.channelPostHandlers, handler)
+// Contact 注册联系信息处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) Contact(handlers ...HandlerFunc) {
+	t.contactHandlers = append(t.contactHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
+}
+
+// Poll 注册轮询处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) Poll(handlers ...HandlerFunc) {
+	t.pollHandlers = append(t.pollHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
+}
+
+// Quiz 注册测验处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) Quiz(handlers ...HandlerFunc) {
+	t.quizHandlers = append(t.quizHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
+}
+
+// RegularPoll 注册普通投票处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) RegularPoll(handlers ...HandlerFunc) {
+	t.regularPollHandlers = append(t.regularPollHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
+}
+
+// Game 注册游戏处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) Game(handlers ...HandlerFunc) {
+	t.gameHandlers = append(t.gameHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
+}
+
+// Voice 注册语音消息处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) Voice(handlers ...HandlerFunc) {
+	t.voiceHandlers = append(t.voiceHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
+}
+
+// VideoNote 注册视频笔记处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) VideoNote(handlers ...HandlerFunc) {
+	t.videoNoteHandlers = append(t.videoNoteHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
+}
+
+// Animation 注册动画处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) Animation(handlers ...HandlerFunc) {
+	t.animationHandlers = append(t.animationHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
+}
+
+// LiveLocation 注册实时位置处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) LiveLocation(handlers ...HandlerFunc) {
+	t.liveLocationHandlers = append(t.liveLocationHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
+}
+
+// ChannelPost 注册频道消息处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) ChannelPost(handlers ...HandlerFunc) {
+	t.channelPostHandlers = append(t.channelPostHandlers, func(c *Context) {
+		c.handlers = handlers
+		c.index = -1
+		c.Next()
+	})
 }
 
 // LocationInRange 注册位置范围处理器
@@ -1010,389 +1064,573 @@ func (t *TelegramRouter) DocumentWithType(mimeType string, maxSize int, handler 
 // applyMiddlewares 应用中间件到处理函数。
 // 按照注册顺序从后向前应用中间件，形成处理链。
 func (t *TelegramRouter) applyMiddlewares(handler HandlerFunc) HandlerFunc {
-	for i := len(t.middlewares) - 1; i >= 0; i-- {
-		middleware := t.middlewares[i]
-		next := handler
-		handler = func(c *Context) {
-			middleware(c, next)
-		}
+	return func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和原始处理链
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+1)
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handler)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
 	}
-	return handler
 }
 
 // HandleUpdate 处理 Telegram 更新消息。
 // 根据消息类型分发到对应的处理函数，并应用中间件。
 // 支持命令、文本、文档、音频、视频、照片、贴纸和回调查询等消息类型。
 func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
-	ctx := &Context{
-		Update: update,
-		Bot:    t.Bot,
-		params: make(map[string]string),
-		query:  make(map[string]string),
+	// 创建上下文
+	c := &Context{
+		Update:   update,
+		Bot:      t.Bot,
+		index:    -1,
+		handlers: nil,
+		aborted:  false,
+		params:   make(map[string]string),
+		query:    make(map[string]string),
 	}
 
-	// 处理命令消息
-	if update.Message != nil && update.Message.IsCommand() {
-		if handler, ok := t.commandHandlers[update.Message.Command()]; ok {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
+	// 首先执行通用更新处理器
+	if len(t.updateHandlers) > 0 {
+		for _, handler := range t.updateHandlers {
+			if c.IsAborted() {
+				return
+			}
+			handler(c)
+		}
+	}
+
+	// 如果通用处理器没有中断，继续执行特定类型的处理器
+	if !c.IsAborted() {
+		// 处理群组相关事件
+		if update.Message != nil {
+			// 处理群组聊天创建
+			if update.Message.GroupChatCreated {
+				if t.groupChatCreatedHandler != nil {
+					t.groupChatCreatedHandler(c)
+					if c.IsAborted() {
+						return
+					}
+				}
+			}
+
+			// 处理超级群组聊天创建
+			if update.Message.SuperGroupChatCreated {
+				if t.supergroupChatCreatedHandler != nil {
+					t.supergroupChatCreatedHandler(c)
+					if c.IsAborted() {
+						return
+					}
+				}
+			}
+
+			// 处理频道聊天创建
+			if update.Message.ChannelChatCreated {
+				if t.channelChatCreatedHandler != nil {
+					t.channelChatCreatedHandler(c)
+					if c.IsAborted() {
+						return
+					}
+				}
+			}
+
+			// 处理新聊天成员
+			if len(update.Message.NewChatMembers) > 0 {
+				if t.newChatMembersHandler != nil {
+					t.newChatMembersHandler(c)
+					if c.IsAborted() {
+						return
+					}
+				}
+			}
+
+			// 处理离开聊天成员
+			if update.Message.LeftChatMember != nil {
+				if t.leftChatMemberHandler != nil {
+					t.leftChatMemberHandler(c)
+					if c.IsAborted() {
+						return
+					}
+				}
+			}
+
+			// 处理新聊天标题
+			if update.Message.NewChatTitle != "" {
+				if t.newChatTitleHandler != nil {
+					t.newChatTitleHandler(c)
+					if c.IsAborted() {
+						return
+					}
+				}
+			}
+
+			// 处理新聊天照片
+			if len(update.Message.NewChatPhoto) > 0 {
+				if t.newChatPhotoHandler != nil {
+					t.newChatPhotoHandler(c)
+					if c.IsAborted() {
+						return
+					}
+				}
+			}
+
+			// 处理删除聊天照片
+			if update.Message.DeleteChatPhoto {
+				if t.deleteChatPhotoHandler != nil {
+					t.deleteChatPhotoHandler(c)
+					if c.IsAborted() {
+						return
+					}
+				}
+			}
+		}
+
+		// 处理编辑后的消息
+		if update.EditedMessage != nil {
+			if t.editedMessageHandler != nil {
+				t.editedMessageHandler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+		}
+
+		// 处理编辑后的频道消息
+		if update.EditedChannelPost != nil {
+			if t.editedChannelPostHandler != nil {
+				t.editedChannelPostHandler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+		}
+
+		// 处理我的聊天成员更新
+		if update.MyChatMember != nil {
+			if t.myChatMemberHandler != nil {
+				t.myChatMemberHandler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+		}
+
+		// 处理聊天成员更新
+		if update.ChatMember != nil {
+			if t.chatMemberHandler != nil {
+				t.chatMemberHandler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+		}
+
+		// 处理投票答案
+		if update.PollAnswer != nil {
+			if t.pollAnswerHandler != nil {
+				t.pollAnswerHandler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+		}
+
+		// 处理预结账查询
+		if update.PreCheckoutQuery != nil {
+			if t.preCheckoutQueryHandler != nil {
+				t.preCheckoutQueryHandler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+		}
+
+		// 处理运费查询
+		if update.ShippingQuery != nil {
+			if t.shippingQueryHandler != nil {
+				t.shippingQueryHandler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+		}
+
+		// 处理成功支付
+		if update.Message != nil && update.Message.SuccessfulPayment != nil {
+			if t.successfulPaymentHandler != nil {
+				t.successfulPaymentHandler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+		}
+
+		// 处理命令消息
+		if update.Message != nil && update.Message.IsCommand() {
+			if handler, ok := t.commandHandlers[update.Message.Command()]; ok {
+				// 直接执行处理函数，因为它已经包含了中间件
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
+				return
+			}
+		}
+
+		// 处理文本消息
+		if update.Message != nil && update.Message.Text != "" {
+			for _, handler := range t.textHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
 			return
 		}
-	}
 
-	// 处理文本消息
-	if update.Message != nil && update.Message.Text != "" {
-		for _, handler := range t.textHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
+		// 处理文档消息
+		if update.Message != nil && update.Message.Document != nil {
+			for _, handler := range t.documentHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
 			}
+			return
 		}
-		return
-	}
 
-	// 处理文档消息
-	if update.Message != nil && update.Message.Document != nil {
-		for _, handler := range t.documentHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
+		// 处理音频消息
+		if update.Message != nil && update.Message.Audio != nil {
+			for _, handler := range t.audioHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
 			}
+			return
 		}
-		return
-	}
 
-	// 处理音频消息
-	if update.Message != nil && update.Message.Audio != nil {
-		for _, handler := range t.audioHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
+		// 处理视频消息
+		if update.Message != nil && update.Message.Video != nil {
+			for _, handler := range t.videoHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
 			}
+			return
 		}
-		return
-	}
 
-	// 处理视频消息
-	if update.Message != nil && update.Message.Video != nil {
-		for _, handler := range t.videoHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
+		// 处理照片消息
+		if update.Message != nil && len(update.Message.Photo) > 0 {
+			for _, handler := range t.photoHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
 			}
+			return
 		}
-		return
-	}
 
-	// 处理照片消息
-	if update.Message != nil && len(update.Message.Photo) > 0 {
-		for _, handler := range t.photoHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
+		// 处理贴纸消息
+		if update.Message != nil && update.Message.Sticker != nil {
+			for _, handler := range t.stickerHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
 			}
+			return
 		}
-		return
-	}
 
-	// 处理贴纸消息
-	if update.Message != nil && update.Message.Sticker != nil {
-		for _, handler := range t.stickerHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
-			}
-		}
-		return
-	}
+		// 处理回调查询
+		if update.CallbackQuery != nil {
+			callback := update.CallbackQuery
 
-	// 处理回调查询
-	if update.CallbackQuery != nil {
-		callback := update.CallbackQuery
+			// 解析回调数据中的查询参数
+			if idx := strings.Index(callback.Data, "?"); idx != -1 {
+				// 分离路径和查询参数
+				path := callback.Data[:idx]
+				queryStr := callback.Data[idx+1:]
+				c.query = parseQuery(queryStr)
 
-		// 解析回调数据中的查询参数
-		if idx := strings.Index(callback.Data, "?"); idx != -1 {
-			// 分离路径和查询参数
-			path := callback.Data[:idx]
-			queryStr := callback.Data[idx+1:]
-			ctx.query = parseQuery(queryStr)
+				// 尝试匹配路由（使用路径部分）
+				for _, route := range t.callbackRoutes {
+					matches := route.regex.FindStringSubmatch(path)
+					if matches != nil {
+						// 提取参数
+						params := make(map[string]string)
+						for i, name := range route.params {
+							if i+1 < len(matches) {
+								params[name] = matches[i+1]
+							}
+						}
 
-			// 尝试匹配路由（使用路径部分）
-			for _, route := range t.callbackRoutes {
-				matches := route.regex.FindStringSubmatch(path)
-				if matches != nil {
-					// 提取参数
-					params := make(map[string]string)
-					for i, name := range route.params {
-						if i+1 < len(matches) {
-							params[name] = matches[i+1]
+						// 设置参数到上下文
+						c.params = params
+
+						// 执行处理函数
+						handler := t.applyMiddlewares(route.handler)
+						handler(c)
+						if c.IsAborted() {
+							return
 						}
 					}
-
-					// 设置参数到上下文
-					ctx.params = params
-
-					// 执行处理函数
-					handler := t.applyMiddlewares(route.handler)
-					handler(ctx)
-					if ctx.IsAborted() {
-						return
-					}
 				}
-			}
-		} else {
-			// 没有查询参数，直接匹配整个回调数据
-			for _, route := range t.callbackRoutes {
-				matches := route.regex.FindStringSubmatch(callback.Data)
-				if matches != nil {
-					// 提取参数
-					params := make(map[string]string)
-					for i, name := range route.params {
-						if i+1 < len(matches) {
-							params[name] = matches[i+1]
+			} else {
+				// 没有查询参数，直接匹配整个回调数据
+				for _, route := range t.callbackRoutes {
+					matches := route.regex.FindStringSubmatch(callback.Data)
+					if matches != nil {
+						// 提取参数
+						params := make(map[string]string)
+						for i, name := range route.params {
+							if i+1 < len(matches) {
+								params[name] = matches[i+1]
+							}
+						}
+
+						// 设置参数到上下文
+						c.params = params
+
+						// 执行处理函数
+						handler := t.applyMiddlewares(route.handler)
+						handler(c)
+						if c.IsAborted() {
+							return
 						}
 					}
+				}
+			}
 
-					// 设置参数到上下文
-					ctx.params = params
+			// 处理未匹配的回调（通用处理器）
+			for _, handler := range t.callbackHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+			return
+		}
 
-					// 执行处理函数
-					handler := t.applyMiddlewares(route.handler)
-					handler(ctx)
-					if ctx.IsAborted() {
-						return
+		// 处理位置消息
+		if update.Message != nil && update.Message.Location != nil {
+			loc := update.Message.Location
+
+			// 检查是否在某个范围内
+			for range_, handlers := range t.locationRangeHandlers {
+				if loc.Latitude >= range_.MinLat && loc.Latitude <= range_.MaxLat &&
+					loc.Longitude >= range_.MinLon && loc.Longitude <= range_.MaxLon {
+					for _, handler := range handlers {
+						handler = t.applyMiddlewares(handler)
+						handler(c)
+						if c.IsAborted() {
+							return
+						}
 					}
 				}
 			}
-		}
 
-		// 处理未匹配的回调（通用处理器）
-		for _, handler := range t.callbackHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
+			// 处理普通位置消息
+			for _, handler := range t.locationHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
 			}
+			return
 		}
-		return
-	}
 
-	// 处理位置消息
-	if update.Message != nil && update.Message.Location != nil {
-		loc := update.Message.Location
+		// 处理联系信息
+		if update.Message != nil && update.Message.Contact != nil {
+			for _, handler := range t.contactHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+			return
+		}
 
-		// 检查是否在某个范围内
-		for range_, handlers := range t.locationRangeHandlers {
-			if loc.Latitude >= range_.MinLat && loc.Latitude <= range_.MaxLat &&
-				loc.Longitude >= range_.MinLon && loc.Longitude <= range_.MaxLon {
-				for _, handler := range handlers {
+		// 处理轮询消息
+		if update.Poll != nil {
+			poll := update.Poll
+
+			// 检查轮询类型和条件
+			for pollType, handlers := range t.pollTypeHandlers {
+				// 检查类型匹配
+				typeMatch := pollType.Type == "" || poll.Type == pollType.Type
+				// 检查投票数
+				votesMatch := pollType.MinVotes == 0 || poll.TotalVoterCount >= pollType.MinVotes
+				// 检查匿名设置
+				anonymousMatch := pollType.IsAnonymous == poll.IsAnonymous
+				// 检查多选设置（仅对 regular 类型有效）
+				multipleMatch := poll.Type != "regular" || pollType.AllowMultiple == poll.AllowsMultipleAnswers
+
+				if typeMatch && votesMatch && anonymousMatch && multipleMatch {
+					for _, handler := range handlers {
+						handler = t.applyMiddlewares(handler)
+						handler(c)
+						if c.IsAborted() {
+							return
+						}
+					}
+				}
+			}
+
+			// 根据轮询类型分发到对应的处理器
+			if poll.Type == "quiz" {
+				// 处理测验
+				for _, handler := range t.quizHandlers {
 					handler = t.applyMiddlewares(handler)
-					handler(ctx)
-					if ctx.IsAborted() {
+					handler(c)
+					if c.IsAborted() {
 						return
 					}
 				}
-			}
-		}
-
-		// 处理普通位置消息
-		for _, handler := range t.locationHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
-			}
-		}
-		return
-	}
-
-	// 处理联系信息
-	if update.Message != nil && update.Message.Contact != nil {
-		for _, handler := range t.contactHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
-			}
-		}
-		return
-	}
-
-	// 处理轮询消息
-	if update.Poll != nil {
-		poll := update.Poll
-
-		// 检查轮询类型和条件
-		for pollType, handlers := range t.pollTypeHandlers {
-			// 检查类型匹配
-			typeMatch := pollType.Type == "" || poll.Type == pollType.Type
-			// 检查投票数
-			votesMatch := pollType.MinVotes == 0 || poll.TotalVoterCount >= pollType.MinVotes
-			// 检查匿名设置
-			anonymousMatch := pollType.IsAnonymous == poll.IsAnonymous
-			// 检查多选设置（仅对 regular 类型有效）
-			multipleMatch := poll.Type != "regular" || pollType.AllowMultiple == poll.AllowsMultipleAnswers
-
-			if typeMatch && votesMatch && anonymousMatch && multipleMatch {
-				for _, handler := range handlers {
+			} else {
+				// 处理普通投票
+				for _, handler := range t.regularPollHandlers {
 					handler = t.applyMiddlewares(handler)
-					handler(ctx)
-					if ctx.IsAborted() {
+					handler(c)
+					if c.IsAborted() {
 						return
 					}
 				}
 			}
+
+			// 处理所有轮询（通用处理器）
+			for _, handler := range t.pollHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+			return
 		}
 
-		// 根据轮询类型分发到对应的处理器
-		if poll.Type == "quiz" {
-			// 处理测验
+		// 处理投票
+		if update.Message != nil && update.Message.Poll != nil && update.Message.Poll.Type == "quiz" {
 			for _, handler := range t.quizHandlers {
 				handler = t.applyMiddlewares(handler)
-				handler(ctx)
-				if ctx.IsAborted() {
+				handler(c)
+				if c.IsAborted() {
 					return
 				}
 			}
-		} else {
-			// 处理普通投票
-			for _, handler := range t.regularPollHandlers {
+			return
+		}
+
+		// 处理游戏
+		if update.Message != nil && update.Message.Game != nil {
+			for _, handler := range t.gameHandlers {
 				handler = t.applyMiddlewares(handler)
-				handler(ctx)
-				if ctx.IsAborted() {
+				handler(c)
+				if c.IsAborted() {
 					return
 				}
 			}
+			return
 		}
 
-		// 处理所有轮询（通用处理器）
-		for _, handler := range t.pollHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
+		// 处理语音消息
+		if update.Message != nil && update.Message.Voice != nil {
+			for _, handler := range t.voiceHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
 			}
+			return
 		}
-		return
-	}
 
-	// 处理投票
-	if update.Message != nil && update.Message.Poll != nil && update.Message.Poll.Type == "quiz" {
-		for _, handler := range t.quizHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
+		// 处理视频笔记
+		if update.Message != nil && update.Message.VideoNote != nil {
+			for _, handler := range t.videoNoteHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
 			}
+			return
 		}
-		return
-	}
 
-	// 处理游戏
-	if update.Message != nil && update.Message.Game != nil {
-		for _, handler := range t.gameHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
+		// 处理动画
+		if update.Message != nil && update.Message.Animation != nil {
+			for _, handler := range t.animationHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
 			}
+			return
 		}
-		return
-	}
 
-	// 处理语音消息
-	if update.Message != nil && update.Message.Voice != nil {
-		for _, handler := range t.voiceHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
+		// 处理位置共享
+		if update.Message != nil && update.Message.Location != nil && update.Message.Location.LivePeriod > 0 {
+			for _, handler := range t.liveLocationHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
 			}
+			return
 		}
-		return
-	}
 
-	// 处理视频笔记
-	if update.Message != nil && update.Message.VideoNote != nil {
-		for _, handler := range t.videoNoteHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
+		// 处理群组/频道消息
+		if update.ChannelPost != nil {
+			for _, handler := range t.channelPostHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
 			}
+			return
 		}
-		return
-	}
 
-	// 处理动画
-	if update.Message != nil && update.Message.Animation != nil {
-		for _, handler := range t.animationHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
-			}
-		}
-		return
-	}
+		// 处理文档类型消息
+		if update.Message != nil && update.Message.Document != nil {
+			doc := update.Message.Document
 
-	// 处理位置共享
-	if update.Message != nil && update.Message.Location != nil && update.Message.Location.LivePeriod > 0 {
-		for _, handler := range t.liveLocationHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
-			}
-		}
-		return
-	}
-
-	// 处理群组/频道消息
-	if update.ChannelPost != nil {
-		for _, handler := range t.channelPostHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
-			}
-		}
-		return
-	}
-
-	// 处理文档类型消息
-	if update.Message != nil && update.Message.Document != nil {
-		doc := update.Message.Document
-
-		// 检查文档类型和大小
-		for fileType, handlers := range t.documentTypeHandlers {
-			if (fileType.MimeType == "" || doc.MimeType == fileType.MimeType) &&
-				(fileType.MaxSize == 0 || doc.FileSize <= fileType.MaxSize) {
-				for _, handler := range handlers {
-					handler = t.applyMiddlewares(handler)
-					handler(ctx)
-					if ctx.IsAborted() {
-						return
+			// 检查文档类型和大小
+			for fileType, handlers := range t.documentTypeHandlers {
+				if (fileType.MimeType == "" || doc.MimeType == fileType.MimeType) &&
+					(fileType.MaxSize == 0 || doc.FileSize <= fileType.MaxSize) {
+					for _, handler := range handlers {
+						handler = t.applyMiddlewares(handler)
+						handler(c)
+						if c.IsAborted() {
+							return
+						}
 					}
 				}
 			}
-		}
 
-		// 处理普通文档消息
-		for _, handler := range t.documentHandlers {
-			handler = t.applyMiddlewares(handler)
-			handler(ctx)
-			if ctx.IsAborted() {
-				return
+			// 处理普通文档消息
+			for _, handler := range t.documentHandlers {
+				handler = t.applyMiddlewares(handler)
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
 			}
+			return
 		}
-		return
 	}
 }
 
@@ -1405,12 +1643,12 @@ type MessageBuilder interface {
 
 // TextMessageBuilder 文本消息构建器
 type TextMessageBuilder struct {
-	Msg tgbotapi.MessageConfig
+	Msg *tgbotapi.MessageConfig
 	bot *tgbotapi.BotAPI
 }
 
 func (b *TextMessageBuilder) Send() (tgbotapi.Message, error) {
-	return b.bot.Send(b.Msg)
+	return b.bot.Send(*b.Msg)
 }
 
 func (b *TextMessageBuilder) WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup) MessageBuilder {
@@ -1430,12 +1668,12 @@ func (b *TextMessageBuilder) WithParseMode(mode string) *TextMessageBuilder {
 
 // PhotoMessageBuilder 图片消息构建器
 type PhotoMessageBuilder struct {
-	Msg tgbotapi.PhotoConfig
+	Msg *tgbotapi.PhotoConfig
 	bot *tgbotapi.BotAPI
 }
 
 func (b *PhotoMessageBuilder) Send() (tgbotapi.Message, error) {
-	return b.bot.Send(b.Msg)
+	return b.bot.Send(*b.Msg)
 }
 
 func (b *PhotoMessageBuilder) WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup) MessageBuilder {
@@ -1460,12 +1698,12 @@ func (b *PhotoMessageBuilder) WithParseMode(mode string) *PhotoMessageBuilder {
 
 // PollMessageBuilder 投票消息构建器
 type PollMessageBuilder struct {
-	Msg tgbotapi.SendPollConfig
+	Msg *tgbotapi.SendPollConfig
 	bot *tgbotapi.BotAPI
 }
 
 func (b *PollMessageBuilder) Send() (tgbotapi.Message, error) {
-	return b.bot.Send(b.Msg)
+	return b.bot.Send(*b.Msg)
 }
 
 func (b *PollMessageBuilder) WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup) MessageBuilder {
@@ -1480,12 +1718,12 @@ func (b *PollMessageBuilder) WithInlineKeyboard(markup tgbotapi.InlineKeyboardMa
 
 // LocationMessageBuilder 位置消息构建器
 type LocationMessageBuilder struct {
-	Msg tgbotapi.LocationConfig
+	Msg *tgbotapi.LocationConfig
 	bot *tgbotapi.BotAPI
 }
 
 func (b *LocationMessageBuilder) Send() (tgbotapi.Message, error) {
-	return b.bot.Send(b.Msg)
+	return b.bot.Send(*b.Msg)
 }
 
 func (b *LocationMessageBuilder) WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup) MessageBuilder {
@@ -1500,12 +1738,12 @@ func (b *LocationMessageBuilder) WithInlineKeyboard(markup tgbotapi.InlineKeyboa
 
 // VenueMessageBuilder 地点消息构建器
 type VenueMessageBuilder struct {
-	Msg tgbotapi.VenueConfig
+	Msg *tgbotapi.VenueConfig
 	bot *tgbotapi.BotAPI
 }
 
 func (b *VenueMessageBuilder) Send() (tgbotapi.Message, error) {
-	return b.bot.Send(b.Msg)
+	return b.bot.Send(*b.Msg)
 }
 
 func (b *VenueMessageBuilder) WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup) MessageBuilder {
@@ -1520,12 +1758,12 @@ func (b *VenueMessageBuilder) WithInlineKeyboard(markup tgbotapi.InlineKeyboardM
 
 // ContactMessageBuilder 联系人消息构建器
 type ContactMessageBuilder struct {
-	Msg tgbotapi.ContactConfig
+	Msg *tgbotapi.ContactConfig
 	bot *tgbotapi.BotAPI
 }
 
 func (b *ContactMessageBuilder) Send() (tgbotapi.Message, error) {
-	return b.bot.Send(b.Msg)
+	return b.bot.Send(*b.Msg)
 }
 
 func (b *ContactMessageBuilder) WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup) MessageBuilder {
@@ -1538,86 +1776,14 @@ func (b *ContactMessageBuilder) WithInlineKeyboard(markup tgbotapi.InlineKeyboar
 	return b
 }
 
-// ReplyWithLocation 创建位置消息构建器
-func (c *Context) ReplyWithLocation(latitude, longitude float64) *LocationMessageBuilder {
-	if c.Message == nil {
-		return nil
-	}
-	msg := tgbotapi.NewLocation(c.Message.Chat.ID, latitude, longitude)
-	msg.ReplyToMessageID = c.Message.MessageID
-	return &LocationMessageBuilder{
-		Msg: msg,
-		bot: c.Bot,
-	}
-}
-
-// ReplyWithVenue 创建地点消息构建器
-func (c *Context) ReplyWithVenue(latitude, longitude float64, title, address string) *VenueMessageBuilder {
-	if c.Message == nil {
-		return nil
-	}
-	msg := tgbotapi.NewVenue(c.Message.Chat.ID, title, address, latitude, longitude)
-	msg.ReplyToMessageID = c.Message.MessageID
-	return &VenueMessageBuilder{
-		Msg: msg,
-		bot: c.Bot,
-	}
-}
-
-// ReplyWithContact 创建联系人消息构建器
-func (c *Context) ReplyWithContact(phoneNumber, firstName string, lastName ...string) *ContactMessageBuilder {
-	if c.Message == nil {
-		return nil
-	}
-	msg := tgbotapi.NewContact(c.Message.Chat.ID, phoneNumber, firstName)
-	if len(lastName) > 0 {
-		msg.LastName = lastName[0]
-	}
-	msg.ReplyToMessageID = c.Message.MessageID
-	return &ContactMessageBuilder{
-		Msg: msg,
-		bot: c.Bot,
-	}
-}
-
-// ReplyWithPoll 创建投票消息构建器
-func (c *Context) ReplyWithPoll(question string, options []string, isAnonymous bool, pollType string) *PollMessageBuilder {
-	if c.Message == nil {
-		return nil
-	}
-	msg := tgbotapi.NewPoll(c.Message.Chat.ID, question, options...)
-	msg.ReplyToMessageID = c.Message.MessageID
-	msg.IsAnonymous = isAnonymous
-	msg.Type = pollType
-	return &PollMessageBuilder{
-		Msg: msg,
-		bot: c.Bot,
-	}
-}
-
-// ReplyWithQuiz 创建测验消息构建器
-func (c *Context) ReplyWithQuiz(question string, options []string, correctOptionID int64) *PollMessageBuilder {
-	if c.Message == nil {
-		return nil
-	}
-	msg := tgbotapi.NewPoll(c.Message.Chat.ID, question, options...)
-	msg.ReplyToMessageID = c.Message.MessageID
-	msg.Type = "quiz"
-	msg.CorrectOptionID = correctOptionID
-	return &PollMessageBuilder{
-		Msg: msg,
-		bot: c.Bot,
-	}
-}
-
 // DocumentMessageBuilder 文档消息构建器
 type DocumentMessageBuilder struct {
-	Msg tgbotapi.DocumentConfig
+	Msg *tgbotapi.DocumentConfig
 	bot *tgbotapi.BotAPI
 }
 
 func (b *DocumentMessageBuilder) Send() (tgbotapi.Message, error) {
-	return b.bot.Send(b.Msg)
+	return b.bot.Send(*b.Msg)
 }
 
 func (b *DocumentMessageBuilder) WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup) MessageBuilder {
@@ -1642,12 +1808,12 @@ func (b *DocumentMessageBuilder) WithParseMode(mode string) *DocumentMessageBuil
 
 // AudioMessageBuilder 音频消息构建器
 type AudioMessageBuilder struct {
-	Msg tgbotapi.AudioConfig
+	Msg *tgbotapi.AudioConfig
 	bot *tgbotapi.BotAPI
 }
 
 func (b *AudioMessageBuilder) Send() (tgbotapi.Message, error) {
-	return b.bot.Send(b.Msg)
+	return b.bot.Send(*b.Msg)
 }
 
 func (b *AudioMessageBuilder) WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup) MessageBuilder {
@@ -1687,12 +1853,12 @@ func (b *AudioMessageBuilder) WithPerformer(performer string) *AudioMessageBuild
 
 // VideoMessageBuilder 视频消息构建器
 type VideoMessageBuilder struct {
-	Msg tgbotapi.VideoConfig
+	Msg *tgbotapi.VideoConfig
 	bot *tgbotapi.BotAPI
 }
 
 func (b *VideoMessageBuilder) Send() (tgbotapi.Message, error) {
-	return b.bot.Send(b.Msg)
+	return b.bot.Send(*b.Msg)
 }
 
 func (b *VideoMessageBuilder) WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup) MessageBuilder {
@@ -1727,12 +1893,12 @@ func (b *VideoMessageBuilder) WithSupportsStreaming(supportsStreaming bool) *Vid
 
 // VoiceMessageBuilder 语音消息构建器
 type VoiceMessageBuilder struct {
-	Msg tgbotapi.VoiceConfig
+	Msg *tgbotapi.VoiceConfig
 	bot *tgbotapi.BotAPI
 }
 
 func (b *VoiceMessageBuilder) Send() (tgbotapi.Message, error) {
-	return b.bot.Send(b.Msg)
+	return b.bot.Send(*b.Msg)
 }
 
 func (b *VoiceMessageBuilder) WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup) MessageBuilder {
@@ -1762,12 +1928,12 @@ func (b *VoiceMessageBuilder) WithDuration(duration int) *VoiceMessageBuilder {
 
 // VideoNoteMessageBuilder 视频笔记消息构建器
 type VideoNoteMessageBuilder struct {
-	Msg tgbotapi.VideoNoteConfig
+	Msg *tgbotapi.VideoNoteConfig
 	bot *tgbotapi.BotAPI
 }
 
 func (b *VideoNoteMessageBuilder) Send() (tgbotapi.Message, error) {
-	return b.bot.Send(b.Msg)
+	return b.bot.Send(*b.Msg)
 }
 
 func (b *VideoNoteMessageBuilder) WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup) MessageBuilder {
@@ -1792,12 +1958,12 @@ func (b *VideoNoteMessageBuilder) WithLength(length int) *VideoNoteMessageBuilde
 
 // StickerMessageBuilder 贴纸消息构建器
 type StickerMessageBuilder struct {
-	Msg tgbotapi.StickerConfig
+	Msg *tgbotapi.StickerConfig
 	bot *tgbotapi.BotAPI
 }
 
 func (b *StickerMessageBuilder) Send() (tgbotapi.Message, error) {
-	return b.bot.Send(b.Msg)
+	return b.bot.Send(*b.Msg)
 }
 
 func (b *StickerMessageBuilder) WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup) MessageBuilder {
@@ -1812,12 +1978,12 @@ func (b *StickerMessageBuilder) WithInlineKeyboard(markup tgbotapi.InlineKeyboar
 
 // AnimationMessageBuilder 动画消息构建器
 type AnimationMessageBuilder struct {
-	Msg tgbotapi.AnimationConfig
+	Msg *tgbotapi.AnimationConfig
 	bot *tgbotapi.BotAPI
 }
 
 func (b *AnimationMessageBuilder) Send() (tgbotapi.Message, error) {
-	return b.bot.Send(b.Msg)
+	return b.bot.Send(*b.Msg)
 }
 
 func (b *AnimationMessageBuilder) WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup) MessageBuilder {
@@ -1950,5 +2116,353 @@ func (t *TelegramRouter) CommandRegex(regex *regexp.Regexp, handler HandlerFunc)
 		if regex.MatchString(c.Message.Command()) {
 			handler(c)
 		}
+	})
+}
+
+// parseRouteParams 解析路由参数
+// 从路由模式中提取参数名，如 "user/:id/profile" 中的 "id"
+func parseRouteParams(pattern string) []string {
+	params := make([]string, 0)
+	parts := strings.Split(pattern, "/")
+	for _, part := range parts {
+		if strings.HasPrefix(part, ":") {
+			params = append(params, part[1:])
+		}
+	}
+	return params
+}
+
+// compileRoutePattern 编译路由模式为正则表达式
+// 支持以下格式：
+// - 静态路径：如 "menu/main"
+// - 参数路径：如 "user/:id/profile"
+// - 通配符：如 "action/*"
+func compileRoutePattern(pattern string) *regexp.Regexp {
+	parts := strings.Split(pattern, "/")
+	for i, part := range parts {
+		if strings.HasPrefix(part, ":") {
+			// 参数匹配，如 :id
+			parts[i] = "([^/]+)"
+		} else if part == "*" {
+			// 通配符匹配
+			parts[i] = ".*"
+		}
+	}
+	regexPattern := "^" + strings.Join(parts, "/") + "$"
+	return regexp.MustCompile(regexPattern)
+}
+
+// ReplyWithLocation 创建位置消息构建器
+func (c *Context) ReplyWithLocation(latitude, longitude float64) *LocationMessageBuilder {
+	if c.Message == nil {
+		return nil
+	}
+	msg := tgbotapi.NewLocation(c.Message.Chat.ID, latitude, longitude)
+	msg.ReplyToMessageID = c.Message.MessageID
+	return &LocationMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
+}
+
+// ReplyWithVenue 创建地点消息构建器
+func (c *Context) ReplyWithVenue(latitude, longitude float64, title, address string) *VenueMessageBuilder {
+	if c.Message == nil {
+		return nil
+	}
+	msg := tgbotapi.NewVenue(c.Message.Chat.ID, title, address, latitude, longitude)
+	msg.ReplyToMessageID = c.Message.MessageID
+	return &VenueMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
+}
+
+// ReplyWithContact 创建联系人消息构建器
+func (c *Context) ReplyWithContact(phoneNumber, firstName string, lastName ...string) *ContactMessageBuilder {
+	if c.Message == nil {
+		return nil
+	}
+	msg := tgbotapi.NewContact(c.Message.Chat.ID, phoneNumber, firstName)
+	if len(lastName) > 0 {
+		msg.LastName = lastName[0]
+	}
+	msg.ReplyToMessageID = c.Message.MessageID
+	return &ContactMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
+}
+
+// ReplyWithPoll 创建投票消息构建器
+func (c *Context) ReplyWithPoll(question string, options []string, isAnonymous bool, pollType string) *PollMessageBuilder {
+	if c.Message == nil {
+		return nil
+	}
+	msg := tgbotapi.NewPoll(c.Message.Chat.ID, question, options...)
+	msg.ReplyToMessageID = c.Message.MessageID
+	msg.IsAnonymous = isAnonymous
+	msg.Type = pollType
+	return &PollMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
+}
+
+// ReplyWithQuiz 创建测验消息构建器
+func (c *Context) ReplyWithQuiz(question string, options []string, correctOptionID int64) *PollMessageBuilder {
+	if c.Message == nil {
+		return nil
+	}
+	msg := tgbotapi.NewPoll(c.Message.Chat.ID, question, options...)
+	msg.ReplyToMessageID = c.Message.MessageID
+	msg.Type = "quiz"
+	msg.CorrectOptionID = correctOptionID
+	return &PollMessageBuilder{
+		Msg: &msg,
+		bot: c.Bot,
+	}
+}
+
+// OnGroupChatCreated 注册群组聊天创建处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnGroupChatCreated(handlers ...HandlerFunc) {
+	t.groupChatCreatedHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnSupergroupChatCreated 注册超级群组聊天创建处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnSupergroupChatCreated(handlers ...HandlerFunc) {
+	t.supergroupChatCreatedHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnChannelChatCreated 注册频道聊天创建处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnChannelChatCreated(handlers ...HandlerFunc) {
+	t.channelChatCreatedHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnNewChatMembers 注册新聊天成员处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnNewChatMembers(handlers ...HandlerFunc) {
+	t.newChatMembersHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnLeftChatMember 注册离开聊天成员处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnLeftChatMember(handlers ...HandlerFunc) {
+	t.leftChatMemberHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnNewChatTitle 注册新聊天标题处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnNewChatTitle(handlers ...HandlerFunc) {
+	t.newChatTitleHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnNewChatPhoto 注册新聊天照片处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnNewChatPhoto(handlers ...HandlerFunc) {
+	t.newChatPhotoHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnDeleteChatPhoto 注册删除聊天照片处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnDeleteChatPhoto(handlers ...HandlerFunc) {
+	t.deleteChatPhotoHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnEditedMessage 注册编辑后的消息处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnEditedMessage(handlers ...HandlerFunc) {
+	t.editedMessageHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnEditedChannelPost 注册编辑后的频道消息处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnEditedChannelPost(handlers ...HandlerFunc) {
+	t.editedChannelPostHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnMyChatMember 注册我的聊天成员更新处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnMyChatMember(handlers ...HandlerFunc) {
+	t.myChatMemberHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnChatMember 注册聊天成员更新处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnChatMember(handlers ...HandlerFunc) {
+	t.chatMemberHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnPollAnswer 注册投票答案处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnPollAnswer(handlers ...HandlerFunc) {
+	t.pollAnswerHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnPreCheckoutQuery 注册预结账查询处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnPreCheckoutQuery(handlers ...HandlerFunc) {
+	t.preCheckoutQueryHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnShippingQuery 注册运费查询处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnShippingQuery(handlers ...HandlerFunc) {
+	t.shippingQueryHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnSuccessfulPayment 注册成功支付处理函数。
+// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+func (t *TelegramRouter) OnSuccessfulPayment(handlers ...HandlerFunc) {
+	t.successfulPaymentHandler = func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
+	}
+}
+
+// OnUpdate 注册通用更新处理函数
+// 可以处理所有类型的 Telegram 更新，包括：
+// - 所有类型的消息（文本、图片、视频等）
+// - 所有类型的事件（群组创建、成员更新等）
+// - 所有类型的回调查询
+// - 所有类型的频道消息
+// - 所有类型的支付相关更新
+func (t *TelegramRouter) OnUpdate(handlers ...HandlerFunc) {
+	t.updateHandlers = append(t.updateHandlers, func(c *Context) {
+		// 创建一个新的处理链，包含所有中间件和处理器
+		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
+		chain = append(chain, t.middlewares...)
+		chain = append(chain, handlers...)
+		c.handlers = chain
+		c.index = -1
+		c.Next()
 	})
 }

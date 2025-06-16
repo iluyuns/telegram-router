@@ -114,56 +114,53 @@ import (
 )
 
 // 日志中间件
-func Logger() router.MiddlewareFunc {
-    return func(next router.HandlerFunc) router.HandlerFunc {
-        return func(c *router.Context) {
-            start := time.Now()
-            next(c)
-            log.Printf("处理消息用时：%v", time.Since(start))
-        }
-    }
+func Logger(c *router.Context) {
+    start := time.Now()
+    c.Next()
+    log.Printf("处理消息用时：%v", time.Since(start))
 }
 
 // 认证中间件
-func Auth(allowedUsers []int64) router.MiddlewareFunc {
-    return func(next router.HandlerFunc) router.HandlerFunc {
-        return func(c *router.Context) {
-            userID := c.Message.From.ID
-            for _, id := range allowedUsers {
-                if id == userID {
-                    next(c)
-                    return
-                }
+func Auth(allowedUsers []int64) router.HandlerFunc {
+    return func(c *router.Context) {
+        userID := c.Message.From.ID
+        for _, id := range allowedUsers {
+            if id == userID {
+                c.Next()
+                return
             }
-            c.Reply("未授权访问")
         }
+        c.Reply("未授权访问")
     }
 }
 
 func main() {
+    // 创建机器人实例
     bot, err := tgbotapi.NewBotAPI("YOUR_BOT_TOKEN")
     if err != nil {
         log.Fatal(err)
     }
 
+    // 创建路由器
     r := router.New(bot)
 
-    // 使用中间件
-    r.Use(Logger())
-    r.Use(Auth([]int64{123456789}))
+    // 添加中间件
+    r.Use(Logger, Auth([]int64{123456789}))
 
-    // 注册处理器
+    // 注册命令处理器
     r.Command("start", func(c *router.Context) {
-        c.Reply("欢迎使用带中间件的机器人！")
+        c.Reply("欢迎使用机器人！")
     })
 
-    r.Start()
+    // 启动机器人
+    log.Printf("机器人已启动：%s", bot.Self.UserName)
+    r.Listen()
 }
 ```
 
-## 回调查询示例
+## 命令处理示例
 
-这个示例展示了如何处理内联键盘和回调查询：
+这个示例展示了如何使用多个处理器处理命令：
 
 ```go
 package main
@@ -175,36 +172,129 @@ import (
 )
 
 func main() {
+    // 创建机器人实例
     bot, err := tgbotapi.NewBotAPI("YOUR_BOT_TOKEN")
     if err != nil {
         log.Fatal(err)
     }
 
+    // 创建路由器
     r := router.New(bot)
 
-    // 创建内联键盘
-    keyboard := tgbotapi.NewInlineKeyboardMarkup(
-        tgbotapi.NewInlineKeyboardRow(
-            tgbotapi.NewInlineKeyboardButtonData("选项 1", "choice:1"),
-            tgbotapi.NewInlineKeyboardButtonData("选项 2", "choice:2"),
-        ),
+    // 注册命令处理器，使用多个处理函数
+    r.Command("start",
+        // 发送欢迎消息
+        func(c *router.Context) {
+            c.Reply("欢迎使用机器人！")
+        },
+        // 记录用户信息
+        func(c *router.Context) {
+            log.Printf("用户 %d 使用了 start 命令", c.Message.From.ID)
+        },
+        // 发送帮助信息
+        func(c *router.Context) {
+            c.Reply("使用 /help 查看帮助信息")
+        },
     )
 
-    // 处理 /menu 命令
+    // 注册文本消息处理器，使用多个处理函数
+    r.Text(
+        // 回复消息
+        func(c *router.Context) {
+            c.Reply("收到您的消息：" + c.Message.Text)
+        },
+        // 记录消息
+        func(c *router.Context) {
+            log.Printf("用户 %d 发送消息：%s", 
+                c.Message.From.ID, 
+                c.Message.Text)
+        },
+    )
+
+    // 启动机器人
+    log.Printf("机器人已启动：%s", bot.Self.UserName)
+    r.Listen()
+}
+```
+
+## 回调查询示例
+
+这个示例展示了如何处理带参数的回调查询：
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+    "github.com/yourusername/telegram-router"
+    tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+)
+
+func main() {
+    // 创建机器人实例
+    bot, err := tgbotapi.NewBotAPI("YOUR_BOT_TOKEN")
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // 创建路由器
+    r := router.New(bot)
+
+    // 注册命令处理器
     r.Command("menu", func(c *router.Context) {
-        builder := c.Reply("请选择一个选项：")
-        builder.WithInlineKeyboard(keyboard)
-        builder.Send()
+        // 创建内联键盘
+        keyboard := tgbotapi.NewInlineKeyboardMarkup(
+            tgbotapi.NewInlineKeyboardRow(
+                tgbotapi.NewInlineKeyboardButtonData("选项 1", "menu/option1"),
+                tgbotapi.NewInlineKeyboardButtonData("选项 2", "menu/option2"),
+            ),
+            tgbotapi.NewInlineKeyboardRow(
+                tgbotapi.NewInlineKeyboardButtonData("用户资料", "user/123/profile"),
+            ),
+        )
+
+        // 发送消息和键盘
+        c.Reply("请选择一个选项：").WithReplyMarkup(keyboard)
     })
 
-    // 处理回调查询
-    r.Callback("choice", func(c *router.Context) {
-        choice := c.Args()[0]
-        c.Answer("你选择了选项 " + choice)
-        c.Edit("你选择了选项 " + choice)
-    })
+    // 注册回调查询处理器，使用多个处理函数
+    r.Callback("menu/option1",
+        // 回复回调查询
+        func(c *router.Context) {
+            c.AnswerCallback("您选择了选项 1")
+        },
+        // 发送消息
+        func(c *router.Context) {
+            c.Reply("选项 1 已选择")
+        },
+        // 记录操作
+        func(c *router.Context) {
+            log.Printf("用户 %d 选择了选项 1", c.Message.From.ID)
+        },
+    )
 
-    r.Start()
+    // 注册带参数的回调查询处理器
+    r.Callback("user/:id/profile",
+        // 验证用户权限
+        func(c *router.Context) {
+            userID := c.Param("id")
+            if userID != fmt.Sprintf("%d", c.Message.From.ID) {
+                c.AnswerCallback("无权访问其他用户的资料")
+                return
+            }
+            c.Next()
+        },
+        // 发送用户资料
+        func(c *router.Context) {
+            c.AnswerCallback("正在加载资料...")
+            c.Reply(fmt.Sprintf("用户 %s 的资料", c.Param("id")))
+        },
+    )
+
+    // 启动机器人
+    log.Printf("机器人已启动：%s", bot.Self.UserName)
+    r.Listen()
 }
 ```
 

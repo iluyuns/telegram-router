@@ -180,26 +180,23 @@ import (
 )
 
 // Logger middleware
-func Logger() router.MiddlewareFunc {
-    return func(c *router.Context, next router.HandlerFunc) {
-        start := time.Now()
-        next(c)
-        log.Printf("Request processed in %v", time.Since(start))
-    }
+func Logger(c *router.Context) {
+    start := time.Now()
+    c.Next()
+    log.Printf("Request processed in %v", time.Since(start))
 }
 
 // Auth middleware
-func Auth(allowedUsers []int64) router.MiddlewareFunc {
-    return func(c *router.Context, next router.HandlerFunc) {
+func Auth(allowedUsers []int64) router.HandlerFunc {
+    return func(c *router.Context) {
         userID := c.Message.From.ID
         for _, id := range allowedUsers {
             if id == userID {
-                next(c)
+                c.Next()
                 return
             }
         }
         c.Reply("Unauthorized access")
-        c.Abort()
     }
 }
 
@@ -214,9 +211,9 @@ func main() {
     r := router.NewTelegramRouter(bot)
 
     // Add middleware
-    r.Use(Logger(), Auth([]int64{123456789}))
+    r.Use(Logger, Auth([]int64{123456789}))
 
-    // Register handlers
+    // Register command handler
     r.Command("start", func(c *router.Context) {
         c.Reply("Welcome to the authenticated bot!")
     })
@@ -227,9 +224,69 @@ func main() {
 }
 ```
 
+## Command Handler Example
+
+This example shows how to use multiple handlers for commands:
+
+```go
+package main
+
+import (
+    "log"
+    "os"
+    "github.com/iluyuns/telegram-router"
+    tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+)
+
+func main() {
+    // Create bot instance
+    bot, err := tgbotapi.NewBotAPI(os.Getenv("TELEGRAM_BOT_TOKEN"))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Create router
+    r := router.NewTelegramRouter(bot)
+
+    // Register command handlers with multiple functions
+    r.Command("start",
+        // Send welcome message
+        func(c *router.Context) {
+            c.Reply("Welcome to the bot!")
+        },
+        // Log user info
+        func(c *router.Context) {
+            log.Printf("User %d used start command", c.Message.From.ID)
+        },
+        // Send help info
+        func(c *router.Context) {
+            c.Reply("Use /help to see help information")
+        },
+    )
+
+    // Register text message handlers with multiple functions
+    r.Text(
+        // Reply to message
+        func(c *router.Context) {
+            c.Reply("Received your message: " + c.Message.Text)
+        },
+        // Log message
+        func(c *router.Context) {
+            log.Printf("User %d sent message: %s", 
+                c.Message.From.ID, 
+                c.Message.Text)
+        },
+    )
+
+    // Start bot
+    log.Printf("Bot started: %s", bot.Self.UserName)
+    r.Listen()
+}
+```
+
 ## Callback Query Example
 
-A bot with inline keyboard and callback query handling:
+This example shows how to handle callback queries with parameters:
 
 ```go
 package main
@@ -238,9 +295,8 @@ import (
     "fmt"
     "log"
     "os"
-
+    "github.com/iluyuns/telegram-router"
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-    router "github.com/iluyuns/telegram-router"
 )
 
 func main() {
@@ -267,30 +323,42 @@ func main() {
         )
 
         // Send message with keyboard
-        builder := c.Reply("Please select an option:")
-        builder.WithReplyMarkup(keyboard)
-        if _, err := builder.Send(); err != nil {
-            log.Printf("Error sending message: %v", err)
-        }
+        c.Reply("Please select an option:").WithReplyMarkup(keyboard)
     })
 
-    // Register callback handlers
-    r.Callback("menu/option1", func(c *router.Context) {
-        c.AnswerCallback("You selected Option 1")
-        c.Reply("Option 1 selected")
-    })
+    // Register callback query handlers with multiple functions
+    r.Callback("menu/option1",
+        // Answer callback query
+        func(c *router.Context) {
+            c.AnswerCallback("You selected Option 1")
+        },
+        // Send message
+        func(c *router.Context) {
+            c.Reply("Option 1 selected")
+        },
+        // Log action
+        func(c *router.Context) {
+            log.Printf("User %d selected Option 1", c.Message.From.ID)
+        },
+    )
 
-    r.Callback("menu/option2", func(c *router.Context) {
-        c.AnswerCallback("You selected Option 2")
-        c.Reply("Option 2 selected")
-    })
-
-    // Handle callback with path parameters
-    r.Callback("user/:id/profile", func(c *router.Context) {
-        userID := c.Param("id")
-        c.AnswerCallback(fmt.Sprintf("Viewing profile of user %s", userID))
-        c.Reply(fmt.Sprintf("Profile of user %s", userID))
-    })
+    // Register callback query handler with parameters
+    r.Callback("user/:id/profile",
+        // Verify user permission
+        func(c *router.Context) {
+            userID := c.Param("id")
+            if userID != fmt.Sprintf("%d", c.Message.From.ID) {
+                c.AnswerCallback("Unauthorized to access other user's profile")
+                return
+            }
+            c.Next()
+        },
+        // Send user profile
+        func(c *router.Context) {
+            c.AnswerCallback("Loading profile...")
+            c.Reply(fmt.Sprintf("Profile of user %s", c.Param("id")))
+        },
+    )
 
     // Start bot
     log.Printf("Bot started: %s", bot.Self.UserName)

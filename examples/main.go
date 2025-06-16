@@ -3,6 +3,8 @@ package main
 import (
 	"log"
 	"os"
+	"strconv"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	router "github.com/iluyuns/telegram-router"
@@ -19,9 +21,18 @@ func main() {
 
 	// 创建路由器
 	r := router.NewTelegramRouter(bot)
+	r.Use(func(c *router.Context) {
+		start := time.Now()
+		c.Next()
+		elapsed := time.Since(start)
+		log.Printf("请求结束: %s", elapsed)
+	})
 
-	// 注册命令处理器
-	r.Command("start", func(c *router.Context) {
+	var startIndex int
+	start := func(c *router.Context) {
+		log.Printf("startIndex: %d", startIndex)
+		startIndex++
+
 		// 发送欢迎消息
 		builder := c.Reply("欢迎使用机器人！\n\n" +
 			"可用命令：\n" +
@@ -53,6 +64,25 @@ func main() {
 		if _, err := builder.Send(); err != nil {
 			log.Printf("发送消息时出错：%v", err)
 		}
+	}
+
+	// 注册命令处理器
+	r.Command("start", start, func(ctx *router.Context) {
+		log.Printf("startIndex: %d", startIndex)
+		startIndex++
+		if _, err := ctx.Reply("startIndex: " + strconv.Itoa(startIndex)).Send(); err != nil {
+			log.Printf("发送消息时出错：%v", err)
+		}
+	})
+	r.OnUpdate(func(ctx *router.Context) {
+		_, err := ctx.Reply("this is update, type: all router").Send()
+		if err != nil {
+			log.Printf("发送消息时出错：%v", err)
+		}
+	})
+	// 群组消息处理器
+	r.OnSupergroupChatCreated(func(c *router.Context) {
+		log.Printf("群组消息: %s", c.Message.Text)
 	})
 
 	// 注册文本消息处理器
