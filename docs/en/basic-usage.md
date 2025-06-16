@@ -11,7 +11,7 @@ package main
 
 import (
     "log"
-    "github.com/yourusername/telegram-router"
+    "github.com/iluyuns/telegram-router"
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 

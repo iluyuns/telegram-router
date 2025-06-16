@@ -28,6 +28,10 @@ func main() {
 		log.Printf("请求结束: %s", elapsed)
 	})
 
+	r.Poll(func(c *router.Context) {
+		log.Printf("poll: %s", c.Message.Text)
+	})
+
 	var startIndex int
 	start := func(c *router.Context) {
 		log.Printf("startIndex: %d", startIndex)

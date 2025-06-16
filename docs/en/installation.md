@@ -10,7 +10,7 @@
 1. Install the package:
 
 ```bash
-go get github.com/yourusername/telegram-router
+go get github.com/iluyuns/telegram-router
 ```
 
 2. Create `main.go`:
@@ -20,7 +20,7 @@ package main
 
 import (
     "log"
-    "github.com/yourusername/telegram-router"
+    "github.com/iluyuns/telegram-router"
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
