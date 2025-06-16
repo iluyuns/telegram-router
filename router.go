@@ -795,8 +795,6 @@ type TelegramRouter struct {
 	preCheckoutQueryHandler      HandlerFunc
 	shippingQueryHandler         HandlerFunc
 	successfulPaymentHandler     HandlerFunc
-	// 添加通用处理器字段
-	messageHandlers []HandlerFunc
 	// 重命名为 updateHandlers
 	updateHandlers []HandlerFunc
 }
@@ -831,8 +829,19 @@ func (t *TelegramRouter) Use(middlewares ...HandlerFunc) *TelegramRouter {
 	return t
 }
 
-// Command 注册命令处理函数。
-// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// Command registers handlers for command messages.
+// These handlers will be called when a user sends a command (e.g., /start).
+// Multiple handlers can be registered for the same command and they will be executed in sequence.
+//
+// Command 注册命令消息的处理函数。
+// 当用户发送命令（如 /start）时，这些处理函数会被调用。
+// 可以为同一个命令注册多个处理函数，它们会按顺序执行。
+//
+// Example 示例:
+//
+//	router.Command("start", func(c *Context) {
+//	    c.Reply("欢迎使用机器人！").Send()
+//	})
 func (t *TelegramRouter) Command(command string, handlers ...HandlerFunc) {
 	t.commandHandlers[command] = func(c *Context) {
 		// 创建一个新的处理链，包含所有中间件和处理器
@@ -845,15 +854,19 @@ func (t *TelegramRouter) Command(command string, handlers ...HandlerFunc) {
 	}
 }
 
-// Text 注册文本消息处理函数。
-// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// Text registers handlers for text messages.
+// These handlers will be called when a user sends a text message.
+// Multiple handlers can be registered and they will be executed in sequence.
 //
-// 示例:
+// Text 注册文本消息的处理函数。
+// 当用户发送文本消息时，这些处理函数会被调用。
+// 可以注册多个处理函数，它们会按顺序执行。
 //
-//	router.Text(
-//	    func(c *Context) { c.Reply("收到文本消息：" + c.Message.Text) },
-//	    func(c *Context) { log.Printf("用户 %d 发送了消息", c.Message.From.ID) },
-//	)
+// Example 示例:
+//
+//	router.Text(func(c *Context) {
+//	    c.Reply("收到文本消息：" + c.Message.Text).Send()
+//	})
 func (t *TelegramRouter) Text(handlers ...HandlerFunc) {
 	t.textHandlers = append(t.textHandlers, func(c *Context) {
 		c.handlers = handlers
@@ -862,8 +875,19 @@ func (t *TelegramRouter) Text(handlers ...HandlerFunc) {
 	})
 }
 
-// Document 注册文档消息处理函数。
-// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// Document registers handlers for document messages.
+// These handlers will be called when a user sends a document.
+// Multiple handlers can be registered and they will be executed in sequence.
+//
+// Document 注册文档消息的处理函数。
+// 当用户发送文档时，这些处理函数会被调用。
+// 可以注册多个处理函数，它们会按顺序执行。
+//
+// Example 示例:
+//
+//	router.Document(func(c *Context) {
+//	    c.Reply("收到文档：" + c.Message.Document.FileName).Send()
+//	})
 func (t *TelegramRouter) Document(handlers ...HandlerFunc) {
 	t.documentHandlers = append(t.documentHandlers, func(c *Context) {
 		c.handlers = handlers
@@ -872,8 +896,19 @@ func (t *TelegramRouter) Document(handlers ...HandlerFunc) {
 	})
 }
 
-// Audio 注册音频消息处理函数。
-// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// Audio registers handlers for audio messages.
+// These handlers will be called when a user sends an audio file.
+// Multiple handlers can be registered and they will be executed in sequence.
+//
+// Audio 注册音频消息的处理函数。
+// 当用户发送音频文件时，这些处理函数会被调用。
+// 可以注册多个处理函数，它们会按顺序执行。
+//
+// Example 示例:
+//
+//	router.Audio(func(c *Context) {
+//	    c.Reply("收到音频文件").Send()
+//	})
 func (t *TelegramRouter) Audio(handlers ...HandlerFunc) {
 	t.audioHandlers = append(t.audioHandlers, func(c *Context) {
 		c.handlers = handlers
@@ -882,8 +917,19 @@ func (t *TelegramRouter) Audio(handlers ...HandlerFunc) {
 	})
 }
 
-// Video 注册视频消息处理函数。
-// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// Video registers handlers for video messages.
+// These handlers will be called when a user sends a video.
+// Multiple handlers can be registered and they will be executed in sequence.
+//
+// Video 注册视频消息的处理函数。
+// 当用户发送视频时，这些处理函数会被调用。
+// 可以注册多个处理函数，它们会按顺序执行。
+//
+// Example 示例:
+//
+//	router.Video(func(c *Context) {
+//	    c.Reply("收到视频文件").Send()
+//	})
 func (t *TelegramRouter) Video(handlers ...HandlerFunc) {
 	t.videoHandlers = append(t.videoHandlers, func(c *Context) {
 		c.handlers = handlers
@@ -892,8 +938,19 @@ func (t *TelegramRouter) Video(handlers ...HandlerFunc) {
 	})
 }
 
-// Photo 注册照片消息处理函数。
-// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// Photo registers handlers for photo messages.
+// These handlers will be called when a user sends a photo.
+// Multiple handlers can be registered and they will be executed in sequence.
+//
+// Photo 注册图片消息的处理函数。
+// 当用户发送图片时，这些处理函数会被调用。
+// 可以注册多个处理函数，它们会按顺序执行。
+//
+// Example 示例:
+//
+//	router.Photo(func(c *Context) {
+//	    c.Reply("收到图片消息").Send()
+//	})
 func (t *TelegramRouter) Photo(handlers ...HandlerFunc) {
 	t.photoHandlers = append(t.photoHandlers, func(c *Context) {
 		c.handlers = handlers
@@ -902,8 +959,19 @@ func (t *TelegramRouter) Photo(handlers ...HandlerFunc) {
 	})
 }
 
-// Sticker 注册贴纸消息处理函数。
-// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// Sticker registers handlers for sticker messages.
+// These handlers will be called when a user sends a sticker.
+// Multiple handlers can be registered and they will be executed in sequence.
+//
+// Sticker 注册贴纸消息的处理函数。
+// 当用户发送贴纸时，这些处理函数会被调用。
+// 可以注册多个处理函数，它们会按顺序执行。
+//
+// Example 示例:
+//
+//	router.Sticker(func(c *Context) {
+//	    c.Reply("收到贴纸").Send()
+//	})
 func (t *TelegramRouter) Sticker(handlers ...HandlerFunc) {
 	t.stickerHandlers = append(t.stickerHandlers, func(c *Context) {
 		c.handlers = handlers
@@ -927,8 +995,20 @@ func (t *TelegramRouter) Callback(pattern string, handlers ...HandlerFunc) {
 	})
 }
 
-// Location 注册位置消息处理函数。
-// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// Location registers handlers for location messages.
+// These handlers will be called when a user sends a location.
+// Multiple handlers can be registered and they will be executed in sequence.
+//
+// Location 注册位置消息的处理函数。
+// 当用户发送位置时，这些处理函数会被调用。
+// 可以注册多个处理函数，它们会按顺序执行。
+//
+// Example 示例:
+//
+//	router.Location(func(c *Context) {
+//	    loc := c.Message.Location
+//	    c.Reply(fmt.Sprintf("收到位置：%.6f, %.6f", loc.Latitude, loc.Longitude)).Send()
+//	})
 func (t *TelegramRouter) Location(handlers ...HandlerFunc) {
 	t.locationHandlers = append(t.locationHandlers, func(c *Context) {
 		c.handlers = handlers
@@ -937,8 +1017,20 @@ func (t *TelegramRouter) Location(handlers ...HandlerFunc) {
 	})
 }
 
-// Contact 注册联系信息处理函数。
-// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// Contact registers handlers for contact messages.
+// These handlers will be called when a user sends a contact.
+// Multiple handlers can be registered and they will be executed in sequence.
+//
+// Contact 注册联系人消息的处理函数。
+// 当用户发送联系人信息时，这些处理函数会被调用。
+// 可以注册多个处理函数，它们会按顺序执行。
+//
+// Example 示例:
+//
+//	router.Contact(func(c *Context) {
+//	    contact := c.Message.Contact
+//	    c.Reply("收到联系人：" + contact.FirstName + " " + contact.LastName).Send()
+//	})
 func (t *TelegramRouter) Contact(handlers ...HandlerFunc) {
 	t.contactHandlers = append(t.contactHandlers, func(c *Context) {
 		c.handlers = handlers
@@ -967,8 +1059,18 @@ func (t *TelegramRouter) Quiz(handlers ...HandlerFunc) {
 	})
 }
 
-// RegularPoll 注册普通投票处理函数。
+// RegularPoll registers handlers for regular (non-quiz) polls.
+// Multiple handlers can be registered and they will be executed in sequence until interrupted.
+//
+// RegularPoll 注册普通投票（非测验类型）的处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// 普通投票允许用户选择多个选项，且不显示正确答案。
+//
+// Example 示例:
+//
+//	router.RegularPoll(func(c *Context) {
+//	    log.Printf("Received regular poll: %s", c.Message.Poll.Question)
+//	})
 func (t *TelegramRouter) RegularPoll(handlers ...HandlerFunc) {
 	t.regularPollHandlers = append(t.regularPollHandlers, func(c *Context) {
 		c.handlers = handlers
@@ -987,8 +1089,20 @@ func (t *TelegramRouter) Game(handlers ...HandlerFunc) {
 	})
 }
 
-// Voice 注册语音消息处理函数。
-// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// Voice registers handlers for voice messages.
+// These handlers will be called when a user sends a voice message.
+// Multiple handlers can be registered and they will be executed in sequence.
+//
+// Voice 注册语音消息的处理函数。
+// 当用户发送语音消息时，这些处理函数会被调用。
+// 可以注册多个处理函数，它们会按顺序执行。
+//
+// Example 示例:
+//
+//	router.Voice(func(c *Context) {
+//	    voice := c.Message.Voice
+//	    c.Reply("收到语音消息：" + strconv.Itoa(voice.Duration) + " 秒").Send()
+//	})
 func (t *TelegramRouter) Voice(handlers ...HandlerFunc) {
 	t.voiceHandlers = append(t.voiceHandlers, func(c *Context) {
 		c.handlers = handlers
@@ -997,8 +1111,20 @@ func (t *TelegramRouter) Voice(handlers ...HandlerFunc) {
 	})
 }
 
-// VideoNote 注册视频笔记处理函数。
-// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// VideoNote registers handlers for video note messages.
+// These handlers will be called when a user sends a video note (circular video).
+// Multiple handlers can be registered and they will be executed in sequence.
+//
+// VideoNote 注册视频笔记消息的处理函数。
+// 当用户发送视频笔记（圆形视频）时，这些处理函数会被调用。
+// 可以注册多个处理函数，它们会按顺序执行。
+//
+// Example 示例:
+//
+//	router.VideoNote(func(c *Context) {
+//	    videoNote := c.Message.VideoNote
+//	    c.Reply("收到视频笔记：" + strconv.Itoa(videoNote.Duration) + " 秒").Send()
+//	})
 func (t *TelegramRouter) VideoNote(handlers ...HandlerFunc) {
 	t.videoNoteHandlers = append(t.videoNoteHandlers, func(c *Context) {
 		c.handlers = handlers
@@ -1007,8 +1133,20 @@ func (t *TelegramRouter) VideoNote(handlers ...HandlerFunc) {
 	})
 }
 
-// Animation 注册动画处理函数。
-// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// Animation registers handlers for animation messages.
+// These handlers will be called when a user sends an animation (GIF-like).
+// Multiple handlers can be registered and they will be executed in sequence.
+//
+// Animation 注册动画消息的处理函数。
+// 当用户发送动画（类似 GIF）时，这些处理函数会被调用。
+// 可以注册多个处理函数，它们会按顺序执行。
+//
+// Example 示例:
+//
+//	router.Animation(func(c *Context) {
+//	    anim := c.Message.Animation
+//	    c.Reply("收到动画：" + anim.FileName).Send()
+//	})
 func (t *TelegramRouter) Animation(handlers ...HandlerFunc) {
 	t.animationHandlers = append(t.animationHandlers, func(c *Context) {
 		c.handlers = handlers
@@ -1017,8 +1155,20 @@ func (t *TelegramRouter) Animation(handlers ...HandlerFunc) {
 	})
 }
 
-// LiveLocation 注册实时位置处理函数。
-// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// LiveLocation registers handlers for live location updates.
+// These handlers will be called when a user shares their live location.
+// Multiple handlers can be registered and they will be executed in sequence.
+//
+// LiveLocation 注册实时位置更新的处理函数。
+// 当用户分享实时位置时，这些处理函数会被调用。
+// 可以注册多个处理函数，它们会按顺序执行。
+//
+// Example 示例:
+//
+//	router.LiveLocation(func(c *Context) {
+//	    loc := c.Message.Location
+//	    c.Reply(fmt.Sprintf("实时位置更新：%.6f, %.6f", loc.Latitude, loc.Longitude)).Send()
+//	})
 func (t *TelegramRouter) LiveLocation(handlers ...HandlerFunc) {
 	t.liveLocationHandlers = append(t.liveLocationHandlers, func(c *Context) {
 		c.handlers = handlers
@@ -1027,8 +1177,19 @@ func (t *TelegramRouter) LiveLocation(handlers ...HandlerFunc) {
 	})
 }
 
-// ChannelPost 注册频道消息处理函数。
-// 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
+// ChannelPost registers handlers for channel post messages.
+// These handlers will be called when a message is posted in a channel.
+// Multiple handlers can be registered and they will be executed in sequence.
+//
+// ChannelPost 注册频道消息的处理函数。
+// 当频道发布消息时，这些处理函数会被调用。
+// 可以注册多个处理函数，它们会按顺序执行。
+//
+// Example 示例:
+//
+//	router.ChannelPost(func(c *Context) {
+//	    c.Reply("收到频道消息：" + c.ChannelPost.Text).Send()
+//	})
 func (t *TelegramRouter) ChannelPost(handlers ...HandlerFunc) {
 	t.channelPostHandlers = append(t.channelPostHandlers, func(c *Context) {
 		c.handlers = handlers

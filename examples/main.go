@@ -75,6 +75,9 @@ func main() {
 		}
 	})
 	r.OnUpdate(func(ctx *router.Context) {
+		if ctx.Message == nil {
+			return // 如果没有消息，直接返回
+		}
 		_, err := ctx.Reply("this is update, type: all router").Send()
 		if err != nil {
 			log.Printf("发送消息时出错：%v", err)
