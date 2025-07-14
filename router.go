@@ -3,6 +3,7 @@
 package telegramrouter
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -12,9 +13,46 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
+
+// NewTelegramRouter 创建一个新的 Telegram 路由器实例。
+// 参数 bot 是已初始化的 Telegram Bot API 实例。
+// 参数 timeout 是处理超时时间，单位：纳秒。传入多个参数时，取第一个。
+// 注意：如果设置了超时，需在 handler 中手动检查 Context 是否超时（如 select <-Context.Done()），否则超时不会自动中断处理逻辑。
+func NewTelegramRouter(bot *tgbotapi.BotAPI, timeout ...time.Duration) *TelegramRouter {
+	t := 30 * time.Second
+	if len(timeout) > 0 {
+		t = timeout[0]
+	}
+	return &TelegramRouter{
+		timeout:               t,
+		Bot:                   bot,
+		commandHandlers:       make(map[string]HandlerFunc),
+		locationRangeHandlers: make(map[LocationRange][]HandlerFunc),
+		documentTypeHandlers:  make(map[FileType][]HandlerFunc),
+		pollTypeHandlers:      make(map[PollType][]HandlerFunc),
+	}
+}
+
+func NewTelegramRouterWithDefaultRecover(bot *tgbotapi.BotAPI) *TelegramRouter {
+	tr := NewTelegramRouter(bot)
+	tr.Use(Recover)
+	return tr
+}
+
+// Recover 恢复处理函数
+func Recover(ctx *Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("Telegram router panic, restarting... %v", r)
+			ctx.Abort()
+		}
+	}()
+	ctx.Next()
+}
 
 // HandlerFunc 定义处理函数的类型。
 // 每个处理函数接收一个 Context 参数，包含当前更新的上下文信息。
@@ -23,6 +61,7 @@ type HandlerFunc func(*Context)
 // Context 封装了 Telegram 更新的上下文信息。
 // 包含原始更新数据、机器人实例、处理函数链等信息。
 type Context struct {
+	context.Context
 	*tgbotapi.Update
 	Bot      *tgbotapi.BotAPI
 	index    int               // 当前执行的处理函数索引
@@ -729,7 +768,8 @@ type WebhookConfig struct {
 // TelegramRouter 是 Telegram 机器人的路由器。
 // 负责注册和管理各种消息类型的处理函数，以及中间件。
 type TelegramRouter struct {
-	Bot *tgbotapi.BotAPI
+	timeout time.Duration // 单位：秒
+	Bot     *tgbotapi.BotAPI
 	// 全局中间件，按注册顺序执行
 	middlewares []HandlerFunc
 	// 文本消息处理器
@@ -797,18 +837,6 @@ type TelegramRouter struct {
 	successfulPaymentHandler     HandlerFunc
 	// 重命名为 updateHandlers
 	updateHandlers []HandlerFunc
-}
-
-// NewTelegramRouter 创建一个新的 Telegram 路由器实例。
-// 参数 bot 是已初始化的 Telegram Bot API 实例。
-func NewTelegramRouter(bot *tgbotapi.BotAPI) *TelegramRouter {
-	return &TelegramRouter{
-		Bot:                   bot,
-		commandHandlers:       make(map[string]HandlerFunc),
-		locationRangeHandlers: make(map[LocationRange][]HandlerFunc),
-		documentTypeHandlers:  make(map[FileType][]HandlerFunc),
-		pollTypeHandlers:      make(map[PollType][]HandlerFunc),
-	}
 }
 
 // Use 添加全局中间件，支持链式调用。
@@ -1240,8 +1268,12 @@ func (t *TelegramRouter) applyMiddlewares(handler HandlerFunc) HandlerFunc {
 // 根据消息类型分发到对应的处理函数，并应用中间件。
 // 支持命令、文本、文档、音频、视频、照片、贴纸和回调查询等消息类型。
 func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
-	// 创建上下文
+	// 创建上下文，并设置超时时间
+	ctx, cancel := context.WithTimeout(context.Background(), t.timeout)
+	defer cancel()
+
 	c := &Context{
+		Context:  ctx,
 		Update:   update,
 		Bot:      t.Bot,
 		index:    -1,
@@ -2246,7 +2278,8 @@ func (r *TelegramRouter) Listen() {
 		Timeout: 60,
 	})
 	for update := range updates {
-		r.HandleUpdate(&update)
+		u := update           // 创建一个副本
+		go r.HandleUpdate(&u) // 异步处理
 	}
 }
 
