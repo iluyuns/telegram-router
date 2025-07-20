@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -22,13 +21,8 @@ import (
 // 参数 bot 是已初始化的 Telegram Bot API 实例。
 // 参数 timeout 是处理超时时间，单位：纳秒。传入多个参数时，取第一个。
 // 注意：如果设置了超时，需在 handler 中手动检查 Context 是否超时（如 select <-Context.Done()），否则超时不会自动中断处理逻辑。
-func NewTelegramRouter(bot *tgbotapi.BotAPI, timeout ...time.Duration) *TelegramRouter {
-	t := 30 * time.Second
-	if len(timeout) > 0 {
-		t = timeout[0]
-	}
+func NewTelegramRouter(bot *tgbotapi.BotAPI) *TelegramRouter {
 	return &TelegramRouter{
-		timeout:               t,
 		Bot:                   bot,
 		commandHandlers:       make(map[string]HandlerFunc),
 		locationRangeHandlers: make(map[LocationRange][]HandlerFunc),
@@ -54,10 +48,6 @@ func Recover(ctx *Context) {
 	ctx.Next()
 }
 
-// HandlerFunc 定义处理函数的类型。
-// 每个处理函数接收一个 Context 参数，包含当前更新的上下文信息。
-type HandlerFunc func(*Context)
-
 // Context 封装了 Telegram 更新的上下文信息。
 // 包含原始更新数据、机器人实例、处理函数链等信息。
 type Context struct {
@@ -70,6 +60,48 @@ type Context struct {
 	params   map[string]string // 路由参数
 	query    map[string]string // URL 查询参数
 }
+
+// LocationRange 位置范围匹配器
+type LocationRange struct {
+	MinLat float64
+	MaxLat float64
+	MinLon float64
+	MaxLon float64
+}
+
+// FileType 文件类型匹配器
+type FileType struct {
+	MimeType string
+	MaxSize  int // 单位：字节，改为 int 类型以匹配 tgbotapi.Document.FileSize
+}
+
+// PollType 轮询类型匹配器
+type PollType struct {
+	Type          string // "quiz" 或 "regular"
+	MinVotes      int    // 最小投票数
+	IsAnonymous   bool   // 是否匿名投票
+	AllowMultiple bool   // 是否允许多选（仅 regular 类型有效）
+}
+
+// CallbackRoute 回调路由节点
+type CallbackRoute struct {
+	pattern string         // 路由模式，如 "user/:id/profile"
+	handler HandlerFunc    // 处理函数
+	params  []string       // 参数名列表，如 ["id"]
+	regex   *regexp.Regexp // 编译后的正则表达式
+}
+
+// WebhookConfig Webhook 配置
+type WebhookConfig struct {
+	ListenAddr string // 监听地址，如 ":8443"
+	CertFile   string // SSL 证书文件路径
+	KeyFile    string // SSL 私钥文件路径
+	WebhookURL string // Webhook URL，如 "https://example.com:8443/bot"
+}
+
+// HandlerFunc 定义处理函数的类型。
+// 每个处理函数接收一个 Context 参数，包含当前更新的上下文信息。
+type HandlerFunc func(*Context)
 
 // executeHandler 执行单个处理函数
 func (c *Context) executeHandler(handler HandlerFunc) {
@@ -727,49 +759,10 @@ func parseQuery(query string) map[string]string {
 	return params
 }
 
-// LocationRange 位置范围匹配器
-type LocationRange struct {
-	MinLat float64
-	MaxLat float64
-	MinLon float64
-	MaxLon float64
-}
-
-// FileType 文件类型匹配器
-type FileType struct {
-	MimeType string
-	MaxSize  int // 单位：字节，改为 int 类型以匹配 tgbotapi.Document.FileSize
-}
-
-// PollType 轮询类型匹配器
-type PollType struct {
-	Type          string // "quiz" 或 "regular"
-	MinVotes      int    // 最小投票数
-	IsAnonymous   bool   // 是否匿名投票
-	AllowMultiple bool   // 是否允许多选（仅 regular 类型有效）
-}
-
-// CallbackRoute 回调路由节点
-type CallbackRoute struct {
-	pattern string         // 路由模式，如 "user/:id/profile"
-	handler HandlerFunc    // 处理函数
-	params  []string       // 参数名列表，如 ["id"]
-	regex   *regexp.Regexp // 编译后的正则表达式
-}
-
-// WebhookConfig Webhook 配置
-type WebhookConfig struct {
-	ListenAddr string // 监听地址，如 ":8443"
-	CertFile   string // SSL 证书文件路径
-	KeyFile    string // SSL 私钥文件路径
-	WebhookURL string // Webhook URL，如 "https://example.com:8443/bot"
-}
-
 // TelegramRouter 是 Telegram 机器人的路由器。
 // 负责注册和管理各种消息类型的处理函数，以及中间件。
 type TelegramRouter struct {
-	timeout time.Duration // 单位：秒
-	Bot     *tgbotapi.BotAPI
+	Bot *tgbotapi.BotAPI
 	// 全局中间件，按注册顺序执行
 	middlewares []HandlerFunc
 	// 文本消息处理器
@@ -1268,12 +1261,8 @@ func (t *TelegramRouter) applyMiddlewares(handler HandlerFunc) HandlerFunc {
 // 根据消息类型分发到对应的处理函数，并应用中间件。
 // 支持命令、文本、文档、音频、视频、照片、贴纸和回调查询等消息类型。
 func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
-	// 创建上下文，并设置超时时间
-	ctx, cancel := context.WithTimeout(context.Background(), t.timeout)
-	defer cancel()
-
 	c := &Context{
-		Context:  ctx,
+		Context:  context.Background(),
 		Update:   update,
 		Bot:      t.Bot,
 		index:    -1,
