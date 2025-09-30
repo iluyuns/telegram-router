@@ -84,5 +84,7 @@ MIT License
 
 如果这个项目对你有帮助，欢迎支持：
 
-![BTC Support](docs/btc.jpeg)
-![WeChat Support](docs/wechat.jpg)
+<div align="center">
+  <img src="docs/btc.jpeg" alt="BTC Support" width="200" />
+  <img src="docs/wechat.jpg" alt="WeChat Support" width="200" />
+</div>
