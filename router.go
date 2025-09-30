@@ -1,6 +1,6 @@
-// Package telegramrouter 提供了一个类似 Gin 风格的 Telegram 机器人路由系统。
+// Package tgr 提供了一个类似 Gin 风格的 Telegram 机器人路由系统。
 // 支持命令、文本、媒体等多种消息类型的路由处理，并提供中间件支持。
-package telegramrouter
+package tgr
 
 import (
 	"context"
@@ -11,20 +11,23 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 // NewTelegramRouter 创建一个新的 Telegram 路由器实例。
 // 参数 bot 是已初始化的 Telegram Bot API 实例。
-// 参数 timeout 是处理超时时间，单位：纳秒。传入多个参数时，取第一个。
-// 注意：如果设置了超时，需在 handler 中手动检查 Context 是否超时（如 select <-Context.Done()），否则超时不会自动中断处理逻辑。
 func NewTelegramRouter(bot *tgbotapi.BotAPI) *TelegramRouter {
 	return &TelegramRouter{
 		Bot:                   bot,
-		commandHandlers:       make(map[string]HandlerFunc),
+		Logger:                log.New(os.Stdout, "tgr ", log.LstdFlags|log.Lshortfile),
+		errorReporter:         nil,
+		commandHandlers:       make(map[string][]HandlerFunc),
 		locationRangeHandlers: make(map[LocationRange][]HandlerFunc),
 		documentTypeHandlers:  make(map[FileType][]HandlerFunc),
 		pollTypeHandlers:      make(map[PollType][]HandlerFunc),
@@ -41,7 +44,11 @@ func NewTelegramRouterWithDefaultRecover(bot *tgbotapi.BotAPI) *TelegramRouter {
 func Recover(ctx *Context) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Printf("Telegram router panic, restarting... %v", r)
+			if ctx != nil && ctx.Logger != nil {
+				ctx.Logger.Printf("Telegram router panic, restarting... %v\n%s", r, debug.Stack())
+			} else {
+				log.Printf("Telegram router panic, restarting... %v\n%s", r, debug.Stack())
+			}
 			ctx.Abort()
 		}
 	}()
@@ -54,11 +61,27 @@ type Context struct {
 	context.Context
 	*tgbotapi.Update
 	Bot      *tgbotapi.BotAPI
+	Logger   *log.Logger
 	index    int               // 当前执行的处理函数索引
 	handlers []HandlerFunc     // 处理函数链
 	aborted  bool              // 是否已中断执行
 	params   map[string]string // 路由参数
 	query    map[string]string // URL 查询参数
+}
+
+// AnswerCallbackOptions 回答回调的可选参数
+type AnswerCallbackOptions struct {
+	Text      string
+	ShowAlert bool
+	URL       string
+	CacheTime int
+}
+
+// EditOptions 编辑消息的可选参数
+type EditOptions struct {
+	ParseMode             string
+	DisableWebPagePreview bool
+	ReplyMarkup           *tgbotapi.InlineKeyboardMarkup
 }
 
 // LocationRange 位置范围匹配器
@@ -91,12 +114,19 @@ type CallbackRoute struct {
 	regex   *regexp.Regexp // 编译后的正则表达式
 }
 
+// CommandRegexRoute 正则命令路由
+type CommandRegexRoute struct {
+	regex    *regexp.Regexp
+	handlers []HandlerFunc
+}
+
 // WebhookConfig Webhook 配置
 type WebhookConfig struct {
 	ListenAddr string // 监听地址，如 ":8443"
 	CertFile   string // SSL 证书文件路径
 	KeyFile    string // SSL 私钥文件路径
 	WebhookURL string // Webhook URL，如 "https://example.com:8443/bot"
+	Path       string // 自定义 Path，如 "/bot"，默认 "/bot"
 }
 
 // HandlerFunc 定义处理函数的类型。
@@ -656,6 +686,130 @@ func (c *Context) ReplyWithStickerFileReader(reader io.Reader) error {
 	return err
 }
 
+// Callback 便捷 API
+// AnswerCallback 回答 CallbackQuery
+func (c *Context) AnswerCallback(opts AnswerCallbackOptions) error {
+	if c.CallbackQuery == nil {
+		return fmt.Errorf("no callback query to answer")
+	}
+	cfg := tgbotapi.NewCallback(c.CallbackQuery.ID, opts.Text)
+	cfg.ShowAlert = opts.ShowAlert
+	if opts.URL != "" {
+		cfg.URL = opts.URL
+	}
+	if opts.CacheTime > 0 {
+		cfg.CacheTime = opts.CacheTime
+	}
+	_, err := c.Bot.Request(cfg)
+	return err
+}
+
+// EditMessageText 根据 CallbackQuery 上下文编辑消息文本
+func (c *Context) EditMessageText(text string, opts *EditOptions) error {
+	if c.CallbackQuery == nil {
+		return fmt.Errorf("no callback query context for edit")
+	}
+	var err error
+	if c.CallbackQuery.Message != nil {
+		msg := tgbotapi.NewEditMessageText(c.CallbackQuery.Message.Chat.ID, c.CallbackQuery.Message.MessageID, text)
+		if opts != nil {
+			msg.ParseMode = opts.ParseMode
+			msg.DisableWebPagePreview = opts.DisableWebPagePreview
+			if opts.ReplyMarkup != nil {
+				msg.ReplyMarkup = opts.ReplyMarkup
+			}
+		}
+		_, err = c.Bot.Request(msg)
+		return err
+	}
+	if c.CallbackQuery.InlineMessageID != "" {
+		msg := tgbotapi.NewEditMessageText(0, 0, text)
+		msg.InlineMessageID = c.CallbackQuery.InlineMessageID
+		if opts != nil {
+			msg.ParseMode = opts.ParseMode
+			msg.DisableWebPagePreview = opts.DisableWebPagePreview
+			if opts.ReplyMarkup != nil {
+				msg.ReplyMarkup = opts.ReplyMarkup
+			}
+		}
+		_, err = c.Bot.Request(msg)
+		return err
+	}
+	return fmt.Errorf("no message to edit")
+}
+
+// EditMessageCaption 根据 CallbackQuery 上下文编辑消息标题
+func (c *Context) EditMessageCaption(caption string, opts *EditOptions) error {
+	if c.CallbackQuery == nil {
+		return fmt.Errorf("no callback query context for edit")
+	}
+	var err error
+	if c.CallbackQuery.Message != nil {
+		msg := tgbotapi.NewEditMessageCaption(c.CallbackQuery.Message.Chat.ID, c.CallbackQuery.Message.MessageID, caption)
+		if opts != nil {
+			msg.ParseMode = opts.ParseMode
+			if opts.ReplyMarkup != nil {
+				msg.ReplyMarkup = opts.ReplyMarkup
+			}
+		}
+		_, err = c.Bot.Request(msg)
+		return err
+	}
+	if c.CallbackQuery.InlineMessageID != "" {
+		msg := tgbotapi.NewEditMessageCaption(0, 0, caption)
+		msg.InlineMessageID = c.CallbackQuery.InlineMessageID
+		if opts != nil {
+			msg.ParseMode = opts.ParseMode
+			if opts.ReplyMarkup != nil {
+				msg.ReplyMarkup = opts.ReplyMarkup
+			}
+		}
+		_, err = c.Bot.Request(msg)
+		return err
+	}
+	return fmt.Errorf("no message to edit caption")
+}
+
+// EditMessageReplyMarkup 根据 CallbackQuery 上下文编辑内联键盘
+func (c *Context) EditMessageReplyMarkup(markup *tgbotapi.InlineKeyboardMarkup) error {
+	if c.CallbackQuery == nil {
+		return fmt.Errorf("no callback query context for edit")
+	}
+	var err error
+	if c.CallbackQuery.Message != nil {
+		msg := tgbotapi.NewEditMessageReplyMarkup(c.CallbackQuery.Message.Chat.ID, c.CallbackQuery.Message.MessageID, *markup)
+		_, err = c.Bot.Request(msg)
+		return err
+	}
+	if c.CallbackQuery.InlineMessageID != "" {
+		msg := tgbotapi.NewEditMessageReplyMarkup(0, 0, *markup)
+		msg.InlineMessageID = c.CallbackQuery.InlineMessageID
+		_, err = c.Bot.Request(msg)
+		return err
+	}
+	return fmt.Errorf("no message to edit reply markup")
+}
+
+// EditMessageMedia 根据 CallbackQuery 上下文编辑媒体（调用方需构造好 Media）
+func (c *Context) EditMessageMedia(cfg tgbotapi.EditMessageMediaConfig, opts *EditOptions) error {
+	if c.CallbackQuery == nil {
+		return fmt.Errorf("no callback query context for edit")
+	}
+	if c.CallbackQuery.Message != nil {
+		cfg.BaseEdit.ChatID = c.CallbackQuery.Message.Chat.ID
+		cfg.BaseEdit.MessageID = c.CallbackQuery.Message.MessageID
+	} else if c.CallbackQuery.InlineMessageID != "" {
+		cfg.InlineMessageID = c.CallbackQuery.InlineMessageID
+	} else {
+		return fmt.Errorf("no message to edit media")
+	}
+	if opts != nil && opts.ReplyMarkup != nil {
+		cfg.ReplyMarkup = opts.ReplyMarkup
+	}
+	_, err := c.Bot.Request(cfg)
+	return err
+}
+
 // Abort 中断处理函数链的执行。
 // 调用此方法后，Next() 将不会执行后续的处理函数。
 func (c *Context) Abort() {
@@ -763,12 +917,20 @@ func parseQuery(query string) map[string]string {
 // 负责注册和管理各种消息类型的处理函数，以及中间件。
 type TelegramRouter struct {
 	Bot *tgbotapi.BotAPI
+	// 可插拔日志器
+	Logger *log.Logger
+	// 错误上报器
+	errorReporter ErrorReporter
+	// 读写锁，保护注册与组合缓存
+	mu sync.RWMutex
 	// 全局中间件，按注册顺序执行
 	middlewares []HandlerFunc
 	// 文本消息处理器
 	textHandlers []HandlerFunc
 	// 命令处理器
-	commandHandlers map[string]HandlerFunc
+	commandHandlers map[string][]HandlerFunc
+	// 正则命令处理器
+	commandRegexRoutes []*CommandRegexRoute
 	// 文档消息处理器
 	documentHandlers []HandlerFunc
 	// 音频消息处理器
@@ -809,27 +971,75 @@ type TelegramRouter struct {
 	locationRangeHandlers map[LocationRange][]HandlerFunc
 	// 文档处理器（带类型匹配）
 	documentTypeHandlers map[FileType][]HandlerFunc
+	// Inline 模式
+	inlineQueryHandlers        []HandlerFunc
+	chosenInlineResultHandlers []HandlerFunc
 	// 回调路由处理器
 	callbackRoutes []*CallbackRoute
-	// 群组相关处理器
-	groupChatCreatedHandler      HandlerFunc
-	supergroupChatCreatedHandler HandlerFunc
-	channelChatCreatedHandler    HandlerFunc
-	newChatMembersHandler        HandlerFunc
-	leftChatMemberHandler        HandlerFunc
-	newChatTitleHandler          HandlerFunc
-	newChatPhotoHandler          HandlerFunc
-	deleteChatPhotoHandler       HandlerFunc
-	editedMessageHandler         HandlerFunc
-	editedChannelPostHandler     HandlerFunc
-	myChatMemberHandler          HandlerFunc
-	chatMemberHandler            HandlerFunc
-	pollAnswerHandler            HandlerFunc
-	preCheckoutQueryHandler      HandlerFunc
-	shippingQueryHandler         HandlerFunc
-	successfulPaymentHandler     HandlerFunc
+	// 群组相关处理器（支持多注册）
+	groupChatCreatedHandlers      []HandlerFunc
+	supergroupChatCreatedHandlers []HandlerFunc
+	channelChatCreatedHandlers    []HandlerFunc
+	newChatMembersHandlers        []HandlerFunc
+	leftChatMemberHandlers        []HandlerFunc
+	newChatTitleHandlers          []HandlerFunc
+	newChatPhotoHandlers          []HandlerFunc
+	deleteChatPhotoHandlers       []HandlerFunc
+	editedMessageHandlers         []HandlerFunc
+	editedChannelPostHandlers     []HandlerFunc
+	myChatMemberHandlers          []HandlerFunc
+	chatMemberHandlers            []HandlerFunc
+	pollAnswerHandlers            []HandlerFunc
+	preCheckoutQueryHandlers      []HandlerFunc
+	shippingQueryHandlers         []HandlerFunc
+	successfulPaymentHandlers     []HandlerFunc
 	// 重命名为 updateHandlers
 	updateHandlers []HandlerFunc
+
+	// --- 组合后缓存，避免分发时重复包装中间件 ---
+	composedDirty                  bool
+	textHandlersC                  []HandlerFunc
+	documentHandlersC              []HandlerFunc
+	audioHandlersC                 []HandlerFunc
+	videoHandlersC                 []HandlerFunc
+	photoHandlersC                 []HandlerFunc
+	stickerHandlersC               []HandlerFunc
+	callbackHandlersC              []HandlerFunc
+	locationHandlersC              []HandlerFunc
+	contactHandlersC               []HandlerFunc
+	pollHandlersC                  []HandlerFunc
+	pollTypeHandlersC              map[PollType][]HandlerFunc
+	quizHandlersC                  []HandlerFunc
+	regularPollHandlersC           []HandlerFunc
+	gameHandlersC                  []HandlerFunc
+	voiceHandlersC                 []HandlerFunc
+	videoNoteHandlersC             []HandlerFunc
+	animationHandlersC             []HandlerFunc
+	liveLocationHandlersC          []HandlerFunc
+	channelPostHandlersC           []HandlerFunc
+	locationRangeHandlersC         map[LocationRange][]HandlerFunc
+	documentTypeHandlersC          map[FileType][]HandlerFunc
+	callbackRoutesC                []*CallbackRoute
+	commandHandlersC               map[string][]HandlerFunc
+	commandRegexRoutesC            []*CommandRegexRoute
+	inlineQueryHandlersC           []HandlerFunc
+	chosenInlineResultHandlersC    []HandlerFunc
+	groupChatCreatedHandlersC      []HandlerFunc
+	supergroupChatCreatedHandlersC []HandlerFunc
+	channelChatCreatedHandlersC    []HandlerFunc
+	newChatMembersHandlersC        []HandlerFunc
+	leftChatMemberHandlersC        []HandlerFunc
+	newChatTitleHandlersC          []HandlerFunc
+	newChatPhotoHandlersC          []HandlerFunc
+	deleteChatPhotoHandlersC       []HandlerFunc
+	editedMessageHandlersC         []HandlerFunc
+	editedChannelPostHandlersC     []HandlerFunc
+	myChatMemberHandlersC          []HandlerFunc
+	chatMemberHandlersC            []HandlerFunc
+	pollAnswerHandlersC            []HandlerFunc
+	preCheckoutQueryHandlersC      []HandlerFunc
+	shippingQueryHandlersC         []HandlerFunc
+	successfulPaymentHandlersC     []HandlerFunc
 }
 
 // Use 添加全局中间件，支持链式调用。
@@ -846,7 +1056,10 @@ type TelegramRouter struct {
 //
 //	router.Use(Logger, Auth([]int64{123456789}), Recovery)
 func (t *TelegramRouter) Use(middlewares ...HandlerFunc) *TelegramRouter {
+	t.mu.Lock()
 	t.middlewares = append(t.middlewares, middlewares...)
+	t.composedDirty = true
+	t.mu.Unlock()
 	return t
 }
 
@@ -864,15 +1077,10 @@ func (t *TelegramRouter) Use(middlewares ...HandlerFunc) *TelegramRouter {
 //	    c.Reply("欢迎使用机器人！").Send()
 //	})
 func (t *TelegramRouter) Command(command string, handlers ...HandlerFunc) {
-	t.commandHandlers[command] = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.mu.Lock()
+	t.commandHandlers[command] = append(t.commandHandlers[command], handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // Text registers handlers for text messages.
@@ -889,11 +1097,10 @@ func (t *TelegramRouter) Command(command string, handlers ...HandlerFunc) {
 //	    c.Reply("收到文本消息：" + c.Message.Text).Send()
 //	})
 func (t *TelegramRouter) Text(handlers ...HandlerFunc) {
-	t.textHandlers = append(t.textHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.textHandlers = append(t.textHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // Document registers handlers for document messages.
@@ -910,11 +1117,10 @@ func (t *TelegramRouter) Text(handlers ...HandlerFunc) {
 //	    c.Reply("收到文档：" + c.Message.Document.FileName).Send()
 //	})
 func (t *TelegramRouter) Document(handlers ...HandlerFunc) {
-	t.documentHandlers = append(t.documentHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.documentHandlers = append(t.documentHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // Audio registers handlers for audio messages.
@@ -931,11 +1137,10 @@ func (t *TelegramRouter) Document(handlers ...HandlerFunc) {
 //	    c.Reply("收到音频文件").Send()
 //	})
 func (t *TelegramRouter) Audio(handlers ...HandlerFunc) {
-	t.audioHandlers = append(t.audioHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.audioHandlers = append(t.audioHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // Video registers handlers for video messages.
@@ -952,11 +1157,10 @@ func (t *TelegramRouter) Audio(handlers ...HandlerFunc) {
 //	    c.Reply("收到视频文件").Send()
 //	})
 func (t *TelegramRouter) Video(handlers ...HandlerFunc) {
-	t.videoHandlers = append(t.videoHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.videoHandlers = append(t.videoHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // Photo registers handlers for photo messages.
@@ -973,11 +1177,10 @@ func (t *TelegramRouter) Video(handlers ...HandlerFunc) {
 //	    c.Reply("收到图片消息").Send()
 //	})
 func (t *TelegramRouter) Photo(handlers ...HandlerFunc) {
-	t.photoHandlers = append(t.photoHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.photoHandlers = append(t.photoHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // Sticker registers handlers for sticker messages.
@@ -994,16 +1197,16 @@ func (t *TelegramRouter) Photo(handlers ...HandlerFunc) {
 //	    c.Reply("收到贴纸").Send()
 //	})
 func (t *TelegramRouter) Sticker(handlers ...HandlerFunc) {
-	t.stickerHandlers = append(t.stickerHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.stickerHandlers = append(t.stickerHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // Callback 注册回调查询处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) Callback(pattern string, handlers ...HandlerFunc) {
+	t.mu.Lock()
 	t.callbackRoutes = append(t.callbackRoutes, &CallbackRoute{
 		pattern: pattern,
 		handler: func(c *Context) {
@@ -1014,6 +1217,8 @@ func (t *TelegramRouter) Callback(pattern string, handlers ...HandlerFunc) {
 		params: parseRouteParams(pattern),
 		regex:  compileRoutePattern(pattern),
 	})
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // Location registers handlers for location messages.
@@ -1031,11 +1236,10 @@ func (t *TelegramRouter) Callback(pattern string, handlers ...HandlerFunc) {
 //	    c.Reply(fmt.Sprintf("收到位置：%.6f, %.6f", loc.Latitude, loc.Longitude)).Send()
 //	})
 func (t *TelegramRouter) Location(handlers ...HandlerFunc) {
-	t.locationHandlers = append(t.locationHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.locationHandlers = append(t.locationHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // Contact registers handlers for contact messages.
@@ -1053,31 +1257,36 @@ func (t *TelegramRouter) Location(handlers ...HandlerFunc) {
 //	    c.Reply("收到联系人：" + contact.FirstName + " " + contact.LastName).Send()
 //	})
 func (t *TelegramRouter) Contact(handlers ...HandlerFunc) {
-	t.contactHandlers = append(t.contactHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.contactHandlers = append(t.contactHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // Poll 注册轮询处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) Poll(handlers ...HandlerFunc) {
-	t.pollHandlers = append(t.pollHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.pollHandlers = append(t.pollHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
+}
+
+// PollWithType 根据类型与条件注册轮询处理器（便捷 API）
+func (t *TelegramRouter) PollWithType(pt PollType, handlers ...HandlerFunc) {
+	t.mu.Lock()
+	t.pollTypeHandlers[pt] = append(t.pollTypeHandlers[pt], handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // Quiz 注册测验处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) Quiz(handlers ...HandlerFunc) {
-	t.quizHandlers = append(t.quizHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.quizHandlers = append(t.quizHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // RegularPoll registers handlers for regular (non-quiz) polls.
@@ -1093,21 +1302,19 @@ func (t *TelegramRouter) Quiz(handlers ...HandlerFunc) {
 //	    log.Printf("Received regular poll: %s", c.Message.Poll.Question)
 //	})
 func (t *TelegramRouter) RegularPoll(handlers ...HandlerFunc) {
-	t.regularPollHandlers = append(t.regularPollHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.regularPollHandlers = append(t.regularPollHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // Game 注册游戏处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) Game(handlers ...HandlerFunc) {
-	t.gameHandlers = append(t.gameHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.gameHandlers = append(t.gameHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // Voice registers handlers for voice messages.
@@ -1125,11 +1332,10 @@ func (t *TelegramRouter) Game(handlers ...HandlerFunc) {
 //	    c.Reply("收到语音消息：" + strconv.Itoa(voice.Duration) + " 秒").Send()
 //	})
 func (t *TelegramRouter) Voice(handlers ...HandlerFunc) {
-	t.voiceHandlers = append(t.voiceHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.voiceHandlers = append(t.voiceHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // VideoNote registers handlers for video note messages.
@@ -1147,11 +1353,10 @@ func (t *TelegramRouter) Voice(handlers ...HandlerFunc) {
 //	    c.Reply("收到视频笔记：" + strconv.Itoa(videoNote.Duration) + " 秒").Send()
 //	})
 func (t *TelegramRouter) VideoNote(handlers ...HandlerFunc) {
-	t.videoNoteHandlers = append(t.videoNoteHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.videoNoteHandlers = append(t.videoNoteHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // Animation registers handlers for animation messages.
@@ -1169,11 +1374,10 @@ func (t *TelegramRouter) VideoNote(handlers ...HandlerFunc) {
 //	    c.Reply("收到动画：" + anim.FileName).Send()
 //	})
 func (t *TelegramRouter) Animation(handlers ...HandlerFunc) {
-	t.animationHandlers = append(t.animationHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.animationHandlers = append(t.animationHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // LiveLocation registers handlers for live location updates.
@@ -1191,11 +1395,10 @@ func (t *TelegramRouter) Animation(handlers ...HandlerFunc) {
 //	    c.Reply(fmt.Sprintf("实时位置更新：%.6f, %.6f", loc.Latitude, loc.Longitude)).Send()
 //	})
 func (t *TelegramRouter) LiveLocation(handlers ...HandlerFunc) {
-	t.liveLocationHandlers = append(t.liveLocationHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.liveLocationHandlers = append(t.liveLocationHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // ChannelPost registers handlers for channel post messages.
@@ -1212,11 +1415,10 @@ func (t *TelegramRouter) LiveLocation(handlers ...HandlerFunc) {
 //	    c.Reply("收到频道消息：" + c.ChannelPost.Text).Send()
 //	})
 func (t *TelegramRouter) ChannelPost(handlers ...HandlerFunc) {
-	t.channelPostHandlers = append(t.channelPostHandlers, func(c *Context) {
-		c.handlers = handlers
-		c.index = -1
-		c.Next()
-	})
+	t.mu.Lock()
+	t.channelPostHandlers = append(t.channelPostHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // LocationInRange 注册位置范围处理器
@@ -1229,6 +1431,9 @@ func (t *TelegramRouter) LocationInRange(minLat, maxLat, minLon, maxLon float64,
 			handler(c)
 		}
 	})
+	t.mu.Lock()
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // DocumentWithType 注册文档类型处理器
@@ -1241,6 +1446,9 @@ func (t *TelegramRouter) DocumentWithType(mimeType string, maxSize int, handler 
 			handler(c)
 		}
 	})
+	t.mu.Lock()
+	t.composedDirty = true
+	t.mu.Unlock()
 }
 
 // applyMiddlewares 应用中间件到处理函数。
@@ -1248,8 +1456,12 @@ func (t *TelegramRouter) DocumentWithType(mimeType string, maxSize int, handler 
 func (t *TelegramRouter) applyMiddlewares(handler HandlerFunc) HandlerFunc {
 	return func(c *Context) {
 		// 创建一个新的处理链，包含所有中间件和原始处理链
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+1)
-		chain = append(chain, t.middlewares...)
+		t.mu.RLock()
+		mws := make([]HandlerFunc, len(t.middlewares))
+		copy(mws, t.middlewares)
+		t.mu.RUnlock()
+		chain := make([]HandlerFunc, 0, len(mws)+1)
+		chain = append(chain, mws...)
 		chain = append(chain, handler)
 		c.handlers = chain
 		c.index = -1
@@ -1257,14 +1469,143 @@ func (t *TelegramRouter) applyMiddlewares(handler HandlerFunc) HandlerFunc {
 	}
 }
 
+// composeHandlers 将所有注册的处理器与中间件组合并缓存，避免分发时重复包装
+func (t *TelegramRouter) composeHandlers() {
+	if !t.composedDirty {
+		return
+	}
+	// 组合期间持有写锁，避免并发注册改动
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	wrapMany := func(src []HandlerFunc) []HandlerFunc {
+		if len(src) == 0 {
+			return nil
+		}
+		out := make([]HandlerFunc, 0, len(src))
+		for _, h := range src {
+			out = append(out, t.applyMiddlewares(h))
+		}
+		return out
+	}
+
+	t.textHandlersC = wrapMany(t.textHandlers)
+	t.documentHandlersC = wrapMany(t.documentHandlers)
+	t.audioHandlersC = wrapMany(t.audioHandlers)
+	t.videoHandlersC = wrapMany(t.videoHandlers)
+	t.photoHandlersC = wrapMany(t.photoHandlers)
+	t.stickerHandlersC = wrapMany(t.stickerHandlers)
+	t.callbackHandlersC = wrapMany(t.callbackHandlers)
+	t.locationHandlersC = wrapMany(t.locationHandlers)
+	t.contactHandlersC = wrapMany(t.contactHandlers)
+	t.pollHandlersC = wrapMany(t.pollHandlers)
+	t.quizHandlersC = wrapMany(t.quizHandlers)
+	t.regularPollHandlersC = wrapMany(t.regularPollHandlers)
+	t.gameHandlersC = wrapMany(t.gameHandlers)
+	t.voiceHandlersC = wrapMany(t.voiceHandlers)
+	t.videoNoteHandlersC = wrapMany(t.videoNoteHandlers)
+	t.animationHandlersC = wrapMany(t.animationHandlers)
+	t.liveLocationHandlersC = wrapMany(t.liveLocationHandlers)
+	t.channelPostHandlersC = wrapMany(t.channelPostHandlers)
+	t.inlineQueryHandlersC = wrapMany(t.inlineQueryHandlers)
+	t.chosenInlineResultHandlersC = wrapMany(t.chosenInlineResultHandlers)
+	t.groupChatCreatedHandlersC = wrapMany(t.groupChatCreatedHandlers)
+	t.supergroupChatCreatedHandlersC = wrapMany(t.supergroupChatCreatedHandlers)
+	t.channelChatCreatedHandlersC = wrapMany(t.channelChatCreatedHandlers)
+	t.newChatMembersHandlersC = wrapMany(t.newChatMembersHandlers)
+	t.leftChatMemberHandlersC = wrapMany(t.leftChatMemberHandlers)
+	t.newChatTitleHandlersC = wrapMany(t.newChatTitleHandlers)
+	t.newChatPhotoHandlersC = wrapMany(t.newChatPhotoHandlers)
+	t.deleteChatPhotoHandlersC = wrapMany(t.deleteChatPhotoHandlers)
+	t.editedMessageHandlersC = wrapMany(t.editedMessageHandlers)
+	t.editedChannelPostHandlersC = wrapMany(t.editedChannelPostHandlers)
+	t.myChatMemberHandlersC = wrapMany(t.myChatMemberHandlers)
+	t.chatMemberHandlersC = wrapMany(t.chatMemberHandlers)
+	t.pollAnswerHandlersC = wrapMany(t.pollAnswerHandlers)
+	t.preCheckoutQueryHandlersC = wrapMany(t.preCheckoutQueryHandlers)
+	t.shippingQueryHandlersC = wrapMany(t.shippingQueryHandlers)
+	t.successfulPaymentHandlersC = wrapMany(t.successfulPaymentHandlers)
+
+	if len(t.pollTypeHandlers) > 0 {
+		t.pollTypeHandlersC = make(map[PollType][]HandlerFunc, len(t.pollTypeHandlers))
+		for k, v := range t.pollTypeHandlers {
+			t.pollTypeHandlersC[k] = wrapMany(v)
+		}
+	} else {
+		t.pollTypeHandlersC = nil
+	}
+
+	if len(t.locationRangeHandlers) > 0 {
+		t.locationRangeHandlersC = make(map[LocationRange][]HandlerFunc, len(t.locationRangeHandlers))
+		for k, v := range t.locationRangeHandlers {
+			t.locationRangeHandlersC[k] = wrapMany(v)
+		}
+	} else {
+		t.locationRangeHandlersC = nil
+	}
+
+	if len(t.documentTypeHandlers) > 0 {
+		t.documentTypeHandlersC = make(map[FileType][]HandlerFunc, len(t.documentTypeHandlers))
+		for k, v := range t.documentTypeHandlers {
+			t.documentTypeHandlersC[k] = wrapMany(v)
+		}
+	} else {
+		t.documentTypeHandlersC = nil
+	}
+
+	// Callback 路由本身持有 handler，这里也包装一层后缓存
+	if len(t.callbackRoutes) > 0 {
+		t.callbackRoutesC = make([]*CallbackRoute, 0, len(t.callbackRoutes))
+		for _, r := range t.callbackRoutes {
+			cr := &CallbackRoute{pattern: r.pattern, params: r.params, regex: r.regex}
+			cr.handler = t.applyMiddlewares(r.handler)
+			t.callbackRoutesC = append(t.callbackRoutesC, cr)
+		}
+	} else {
+		t.callbackRoutesC = nil
+	}
+
+	// 命令
+	if len(t.commandHandlers) > 0 {
+		t.commandHandlersC = make(map[string][]HandlerFunc, len(t.commandHandlers))
+		for k, v := range t.commandHandlers {
+			t.commandHandlersC[k] = wrapMany(v)
+		}
+	} else {
+		t.commandHandlersC = nil
+	}
+	if len(t.commandRegexRoutes) > 0 {
+		t.commandRegexRoutesC = make([]*CommandRegexRoute, 0, len(t.commandRegexRoutes))
+		for _, r := range t.commandRegexRoutes {
+			t.commandRegexRoutesC = append(t.commandRegexRoutesC, &CommandRegexRoute{regex: r.regex, handlers: wrapMany(r.handlers)})
+		}
+	} else {
+		t.commandRegexRoutesC = nil
+	}
+
+	t.composedDirty = false
+}
+
+// SetLogger 设置自定义日志器
+func (t *TelegramRouter) SetLogger(logger *log.Logger) *TelegramRouter {
+	if logger != nil {
+		t.Logger = logger
+	}
+	return t
+}
+
 // HandleUpdate 处理 Telegram 更新消息。
 // 根据消息类型分发到对应的处理函数，并应用中间件。
 // 支持命令、文本、文档、音频、视频、照片、贴纸和回调查询等消息类型。
 func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
+	if t.composedDirty {
+		t.composeHandlers()
+	}
 	c := &Context{
 		Context:  context.Background(),
 		Update:   update,
 		Bot:      t.Bot,
+		Logger:   t.Logger,
 		index:    -1,
 		handlers: nil,
 		aborted:  false,
@@ -1288,8 +1629,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 		if update.Message != nil {
 			// 处理群组聊天创建
 			if update.Message.GroupChatCreated {
-				if t.groupChatCreatedHandler != nil {
-					t.groupChatCreatedHandler(c)
+				for _, h := range t.groupChatCreatedHandlersC {
+					h(c)
 					if c.IsAborted() {
 						return
 					}
@@ -1298,8 +1639,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 			// 处理超级群组聊天创建
 			if update.Message.SuperGroupChatCreated {
-				if t.supergroupChatCreatedHandler != nil {
-					t.supergroupChatCreatedHandler(c)
+				for _, h := range t.supergroupChatCreatedHandlersC {
+					h(c)
 					if c.IsAborted() {
 						return
 					}
@@ -1308,8 +1649,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 			// 处理频道聊天创建
 			if update.Message.ChannelChatCreated {
-				if t.channelChatCreatedHandler != nil {
-					t.channelChatCreatedHandler(c)
+				for _, h := range t.channelChatCreatedHandlersC {
+					h(c)
 					if c.IsAborted() {
 						return
 					}
@@ -1318,8 +1659,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 			// 处理新聊天成员
 			if len(update.Message.NewChatMembers) > 0 {
-				if t.newChatMembersHandler != nil {
-					t.newChatMembersHandler(c)
+				for _, h := range t.newChatMembersHandlersC {
+					h(c)
 					if c.IsAborted() {
 						return
 					}
@@ -1328,8 +1669,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 			// 处理离开聊天成员
 			if update.Message.LeftChatMember != nil {
-				if t.leftChatMemberHandler != nil {
-					t.leftChatMemberHandler(c)
+				for _, h := range t.leftChatMemberHandlersC {
+					h(c)
 					if c.IsAborted() {
 						return
 					}
@@ -1338,8 +1679,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 			// 处理新聊天标题
 			if update.Message.NewChatTitle != "" {
-				if t.newChatTitleHandler != nil {
-					t.newChatTitleHandler(c)
+				for _, h := range t.newChatTitleHandlersC {
+					h(c)
 					if c.IsAborted() {
 						return
 					}
@@ -1348,8 +1689,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 			// 处理新聊天照片
 			if len(update.Message.NewChatPhoto) > 0 {
-				if t.newChatPhotoHandler != nil {
-					t.newChatPhotoHandler(c)
+				for _, h := range t.newChatPhotoHandlersC {
+					h(c)
 					if c.IsAborted() {
 						return
 					}
@@ -1358,8 +1699,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 			// 处理删除聊天照片
 			if update.Message.DeleteChatPhoto {
-				if t.deleteChatPhotoHandler != nil {
-					t.deleteChatPhotoHandler(c)
+				for _, h := range t.deleteChatPhotoHandlersC {
+					h(c)
 					if c.IsAborted() {
 						return
 					}
@@ -1369,8 +1710,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理编辑后的消息
 		if update.EditedMessage != nil {
-			if t.editedMessageHandler != nil {
-				t.editedMessageHandler(c)
+			for _, h := range t.editedMessageHandlersC {
+				h(c)
 				if c.IsAborted() {
 					return
 				}
@@ -1379,8 +1720,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理编辑后的频道消息
 		if update.EditedChannelPost != nil {
-			if t.editedChannelPostHandler != nil {
-				t.editedChannelPostHandler(c)
+			for _, h := range t.editedChannelPostHandlersC {
+				h(c)
 				if c.IsAborted() {
 					return
 				}
@@ -1389,8 +1730,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理我的聊天成员更新
 		if update.MyChatMember != nil {
-			if t.myChatMemberHandler != nil {
-				t.myChatMemberHandler(c)
+			for _, h := range t.myChatMemberHandlersC {
+				h(c)
 				if c.IsAborted() {
 					return
 				}
@@ -1399,8 +1740,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理聊天成员更新
 		if update.ChatMember != nil {
-			if t.chatMemberHandler != nil {
-				t.chatMemberHandler(c)
+			for _, h := range t.chatMemberHandlersC {
+				h(c)
 				if c.IsAborted() {
 					return
 				}
@@ -1409,8 +1750,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理投票答案
 		if update.PollAnswer != nil {
-			if t.pollAnswerHandler != nil {
-				t.pollAnswerHandler(c)
+			for _, h := range t.pollAnswerHandlersC {
+				h(c)
 				if c.IsAborted() {
 					return
 				}
@@ -1419,8 +1760,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理预结账查询
 		if update.PreCheckoutQuery != nil {
-			if t.preCheckoutQueryHandler != nil {
-				t.preCheckoutQueryHandler(c)
+			for _, h := range t.preCheckoutQueryHandlersC {
+				h(c)
 				if c.IsAborted() {
 					return
 				}
@@ -1429,8 +1770,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理运费查询
 		if update.ShippingQuery != nil {
-			if t.shippingQueryHandler != nil {
-				t.shippingQueryHandler(c)
+			for _, h := range t.shippingQueryHandlersC {
+				h(c)
 				if c.IsAborted() {
 					return
 				}
@@ -1439,8 +1780,8 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理成功支付
 		if update.Message != nil && update.Message.SuccessfulPayment != nil {
-			if t.successfulPaymentHandler != nil {
-				t.successfulPaymentHandler(c)
+			for _, h := range t.successfulPaymentHandlersC {
+				h(c)
 				if c.IsAborted() {
 					return
 				}
@@ -1449,20 +1790,54 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理命令消息
 		if update.Message != nil && update.Message.IsCommand() {
-			if handler, ok := t.commandHandlers[update.Message.Command()]; ok {
-				// 直接执行处理函数，因为它已经包含了中间件
-				handler(c)
-				if c.IsAborted() {
-					return
+			cmd := update.Message.Command()
+			if handlers, ok := t.commandHandlersC[cmd]; ok {
+				for _, h := range handlers {
+					h(c)
+					if c.IsAborted() {
+						return
+					}
 				}
 				return
+			}
+			if len(t.commandRegexRoutesC) > 0 {
+				for _, route := range t.commandRegexRoutesC {
+					if route.regex.MatchString(cmd) {
+						for _, h := range route.handlers {
+							h(c)
+							if c.IsAborted() {
+								return
+							}
+						}
+						return
+					}
+				}
 			}
 		}
 
 		// 处理文本消息
 		if update.Message != nil && update.Message.Text != "" {
-			for _, handler := range t.textHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.textHandlersC {
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+			return
+		}
+
+		// 处理 Inline 模式
+		if update.InlineQuery != nil {
+			for _, handler := range t.inlineQueryHandlersC {
+				handler(c)
+				if c.IsAborted() {
+					return
+				}
+			}
+			return
+		}
+		if update.ChosenInlineResult != nil {
+			for _, handler := range t.chosenInlineResultHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1473,8 +1848,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理文档消息
 		if update.Message != nil && update.Message.Document != nil {
-			for _, handler := range t.documentHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.documentHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1485,8 +1859,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理音频消息
 		if update.Message != nil && update.Message.Audio != nil {
-			for _, handler := range t.audioHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.audioHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1497,8 +1870,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理视频消息
 		if update.Message != nil && update.Message.Video != nil {
-			for _, handler := range t.videoHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.videoHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1509,8 +1881,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理照片消息
 		if update.Message != nil && len(update.Message.Photo) > 0 {
-			for _, handler := range t.photoHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.photoHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1521,8 +1892,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理贴纸消息
 		if update.Message != nil && update.Message.Sticker != nil {
-			for _, handler := range t.stickerHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.stickerHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1543,7 +1913,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 				c.query = parseQuery(queryStr)
 
 				// 尝试匹配路由（使用路径部分）
-				for _, route := range t.callbackRoutes {
+				for _, route := range t.callbackRoutesC {
 					matches := route.regex.FindStringSubmatch(path)
 					if matches != nil {
 						// 提取参数
@@ -1558,8 +1928,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 						c.params = params
 
 						// 执行处理函数
-						handler := t.applyMiddlewares(route.handler)
-						handler(c)
+						route.handler(c)
 						if c.IsAborted() {
 							return
 						}
@@ -1567,7 +1936,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 				}
 			} else {
 				// 没有查询参数，直接匹配整个回调数据
-				for _, route := range t.callbackRoutes {
+				for _, route := range t.callbackRoutesC {
 					matches := route.regex.FindStringSubmatch(callback.Data)
 					if matches != nil {
 						// 提取参数
@@ -1582,8 +1951,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 						c.params = params
 
 						// 执行处理函数
-						handler := t.applyMiddlewares(route.handler)
-						handler(c)
+						route.handler(c)
 						if c.IsAborted() {
 							return
 						}
@@ -1592,8 +1960,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 			}
 
 			// 处理未匹配的回调（通用处理器）
-			for _, handler := range t.callbackHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.callbackHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1607,11 +1974,10 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 			loc := update.Message.Location
 
 			// 检查是否在某个范围内
-			for range_, handlers := range t.locationRangeHandlers {
+			for range_, handlers := range t.locationRangeHandlersC {
 				if loc.Latitude >= range_.MinLat && loc.Latitude <= range_.MaxLat &&
 					loc.Longitude >= range_.MinLon && loc.Longitude <= range_.MaxLon {
 					for _, handler := range handlers {
-						handler = t.applyMiddlewares(handler)
 						handler(c)
 						if c.IsAborted() {
 							return
@@ -1621,8 +1987,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 			}
 
 			// 处理普通位置消息
-			for _, handler := range t.locationHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.locationHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1648,7 +2013,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 			poll := update.Poll
 
 			// 检查轮询类型和条件
-			for pollType, handlers := range t.pollTypeHandlers {
+			for pollType, handlers := range t.pollTypeHandlersC {
 				// 检查类型匹配
 				typeMatch := pollType.Type == "" || poll.Type == pollType.Type
 				// 检查投票数
@@ -1660,7 +2025,6 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 				if typeMatch && votesMatch && anonymousMatch && multipleMatch {
 					for _, handler := range handlers {
-						handler = t.applyMiddlewares(handler)
 						handler(c)
 						if c.IsAborted() {
 							return
@@ -1672,8 +2036,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 			// 根据轮询类型分发到对应的处理器
 			if poll.Type == "quiz" {
 				// 处理测验
-				for _, handler := range t.quizHandlers {
-					handler = t.applyMiddlewares(handler)
+				for _, handler := range t.quizHandlersC {
 					handler(c)
 					if c.IsAborted() {
 						return
@@ -1681,8 +2044,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 				}
 			} else {
 				// 处理普通投票
-				for _, handler := range t.regularPollHandlers {
-					handler = t.applyMiddlewares(handler)
+				for _, handler := range t.regularPollHandlersC {
 					handler(c)
 					if c.IsAborted() {
 						return
@@ -1691,8 +2053,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 			}
 
 			// 处理所有轮询（通用处理器）
-			for _, handler := range t.pollHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.pollHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1703,8 +2064,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理投票
 		if update.Message != nil && update.Message.Poll != nil && update.Message.Poll.Type == "quiz" {
-			for _, handler := range t.quizHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.quizHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1715,8 +2075,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理游戏
 		if update.Message != nil && update.Message.Game != nil {
-			for _, handler := range t.gameHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.gameHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1727,8 +2086,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理语音消息
 		if update.Message != nil && update.Message.Voice != nil {
-			for _, handler := range t.voiceHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.voiceHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1739,8 +2097,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理视频笔记
 		if update.Message != nil && update.Message.VideoNote != nil {
-			for _, handler := range t.videoNoteHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.videoNoteHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1751,8 +2108,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理动画
 		if update.Message != nil && update.Message.Animation != nil {
-			for _, handler := range t.animationHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.animationHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1763,8 +2119,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理位置共享
 		if update.Message != nil && update.Message.Location != nil && update.Message.Location.LivePeriod > 0 {
-			for _, handler := range t.liveLocationHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.liveLocationHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1775,8 +2130,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 
 		// 处理群组/频道消息
 		if update.ChannelPost != nil {
-			for _, handler := range t.channelPostHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.channelPostHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1790,11 +2144,10 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 			doc := update.Message.Document
 
 			// 检查文档类型和大小
-			for fileType, handlers := range t.documentTypeHandlers {
+			for fileType, handlers := range t.documentTypeHandlersC {
 				if (fileType.MimeType == "" || doc.MimeType == fileType.MimeType) &&
 					(fileType.MaxSize == 0 || doc.FileSize <= fileType.MaxSize) {
 					for _, handler := range handlers {
-						handler = t.applyMiddlewares(handler)
 						handler(c)
 						if c.IsAborted() {
 							return
@@ -1804,8 +2157,7 @@ func (t *TelegramRouter) HandleUpdate(update *tgbotapi.Update) {
 			}
 
 			// 处理普通文档消息
-			for _, handler := range t.documentHandlers {
-				handler = t.applyMiddlewares(handler)
+			for _, handler := range t.documentHandlersC {
 				handler(c)
 				if c.IsAborted() {
 					return
@@ -1821,6 +2173,19 @@ type MessageBuilder interface {
 	Send() (tgbotapi.Message, error)
 	WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup) MessageBuilder
 	WithInlineKeyboard(markup tgbotapi.InlineKeyboardMarkup) MessageBuilder
+}
+
+// ErrorReporter 错误上报接口
+type ErrorReporter interface {
+	Report(ctx context.Context, err error, fields ...any)
+}
+
+// SetErrorReporter 设置错误上报器
+func (t *TelegramRouter) SetErrorReporter(r ErrorReporter) *TelegramRouter {
+	t.mu.Lock()
+	t.errorReporter = r
+	t.mu.Unlock()
+	return t
 }
 
 // TextMessageBuilder 文本消息构建器
@@ -1896,6 +2261,94 @@ func (b *PollMessageBuilder) WithReplyMarkup(markup tgbotapi.ReplyKeyboardMarkup
 func (b *PollMessageBuilder) WithInlineKeyboard(markup tgbotapi.InlineKeyboardMarkup) MessageBuilder {
 	b.Msg.ReplyMarkup = markup
 	return b
+}
+
+// 常用便捷方法
+// DeleteMessage 删除当前消息（在 Message 上下文中）
+func (c *Context) DeleteMessage() error {
+	if c.Message == nil {
+		return fmt.Errorf("no message to delete")
+	}
+	_, err := c.Bot.Request(tgbotapi.DeleteMessageConfig{ChatID: c.Message.Chat.ID, MessageID: c.Message.MessageID})
+	return err
+}
+
+// ForwardTo 转发当前消息到指定 chat
+func (c *Context) ForwardTo(chatID int64) (tgbotapi.Message, error) {
+	if c.Message == nil {
+		return tgbotapi.Message{}, fmt.Errorf("no message to forward")
+	}
+	msg := tgbotapi.NewForward(chatID, c.Message.Chat.ID, c.Message.MessageID)
+	return c.Bot.Send(msg)
+}
+
+// CopyTo 复制当前消息到指定 chat
+func (c *Context) CopyTo(chatID int64) (tgbotapi.Message, error) {
+	if c.Message == nil {
+		return tgbotapi.Message{}, fmt.Errorf("no message to copy")
+	}
+	msg := tgbotapi.NewCopyMessage(chatID, c.Message.Chat.ID, c.Message.MessageID)
+	return c.Bot.Send(msg)
+}
+
+// MediaGroupBuilder 相册/媒体组发送
+type MediaGroupBuilder struct {
+	ChatID int64
+	Media  []interface{}
+	bot    *tgbotapi.BotAPI
+}
+
+// ReplyWithMediaGroup 构建媒体组
+func (c *Context) ReplyWithMediaGroup() *MediaGroupBuilder {
+	if c.Message == nil {
+		return nil
+	}
+	return &MediaGroupBuilder{ChatID: c.Message.Chat.ID, bot: c.Bot}
+}
+
+func (b *MediaGroupBuilder) Add(media interface{}) *MediaGroupBuilder {
+	b.Media = append(b.Media, media)
+	return b
+}
+
+func (b *MediaGroupBuilder) Send() ([]tgbotapi.Message, error) {
+	cfg := tgbotapi.MediaGroupConfig{ChatID: b.ChatID}
+	cfg.Media = b.Media
+	// 直接请求底层，因 SendMediaGroup 的 builder 在 v5 里使用 MediaGroupConfig
+	resp, err := b.bot.Request(cfg)
+	if err != nil {
+		return nil, err
+	}
+	// 交由调用方解析；此处返回空切片以保持兼容，避免引入 json 解析
+	_ = resp
+	return []tgbotapi.Message{}, nil
+}
+
+// SendChatAction 发送聊天动作（typing 等）
+func (c *Context) SendChatAction(action string) error {
+	if c.Message == nil {
+		return fmt.Errorf("no message context for chat action")
+	}
+	_, err := c.Bot.Request(tgbotapi.NewChatAction(c.Message.Chat.ID, action))
+	return err
+}
+
+// InvoiceBuilder 支付发票（简化版）
+type InvoiceBuilder struct {
+	Msg *tgbotapi.InvoiceConfig
+	bot *tgbotapi.BotAPI
+}
+
+func (c *Context) SendInvoice() *InvoiceBuilder {
+	if c.Message == nil {
+		return nil
+	}
+	msg := tgbotapi.InvoiceConfig{BaseChat: tgbotapi.BaseChat{ChatID: c.Message.Chat.ID}}
+	return &InvoiceBuilder{Msg: &msg, bot: c.Bot}
+}
+
+func (b *InvoiceBuilder) Send() (tgbotapi.Message, error) {
+	return b.bot.Send(*b.Msg)
 }
 
 // LocationMessageBuilder 位置消息构建器
@@ -2233,7 +2686,14 @@ func (r *TelegramRouter) RemoveWebhook() error {
 func (r *TelegramRouter) HandleWebhookRequest(w http.ResponseWriter, req *http.Request) {
 	update, err := r.Bot.HandleUpdate(req)
 	if err != nil {
-		log.Printf("处理更新失败: %v", err)
+		if r.Logger != nil {
+			r.Logger.Printf("处理更新失败: %v", err)
+		} else {
+			log.Printf("处理更新失败: %v", err)
+		}
+		if r.errorReporter != nil {
+			r.errorReporter.Report(req.Context(), err, "path", req.URL.Path)
+		}
 		http.Error(w, "处理更新失败", http.StatusBadRequest)
 		return
 	}
@@ -2241,34 +2701,160 @@ func (r *TelegramRouter) HandleWebhookRequest(w http.ResponseWriter, req *http.R
 	w.WriteHeader(http.StatusOK)
 }
 
-// StartWebhook 启动 Webhook 服务器
-func (r *TelegramRouter) StartWebhook(config WebhookConfig) error {
-	// 设置 Webhook
-	if err := r.SetWebhook(config); err != nil {
-		return fmt.Errorf("设置 Webhook 失败: %v", err)
+// NewWebhookServer 基于自定义 mux 构造 *http.Server（不启动）
+// 遵循“不强占默认 ServeMux”的注意事项
+func (t *TelegramRouter) NewWebhookServer(listenAddr, path string) *http.Server {
+	if path == "" {
+		path = "/bot"
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(path, t.HandleWebhookRequest)
+	return &http.Server{Addr: listenAddr, Handler: mux}
+}
+
+// AttachToServer 将处理函数挂载到外部 *http.Server（不启动）
+func (t *TelegramRouter) AttachToServer(srv *http.Server, path string) {
+	if srv == nil {
+		return
+	}
+	if path == "" {
+		path = "/bot"
+	}
+	// 如果已有 mux 则复用，否则创建一个新的 mux
+	var mux *http.ServeMux
+	if sm, ok := srv.Handler.(*http.ServeMux); ok && sm != nil {
+		mux = sm
+	} else {
+		mux = http.NewServeMux()
+		srv.Handler = mux
+	}
+	mux.HandleFunc(path, t.HandleWebhookRequest)
+}
+
+const defaultQueueSize = 1024
+
+// ListenWithContext 长轮询，带取消上下文且使用有界缓冲队列（保证外部取消时尽量不丢消息）
+// 默认队列大小为 1024；如果需要自定义可以改此实现或添加参数。
+// 默认并发度为 8；如果需要自定义可以改此实现或添加参数。
+func (r *TelegramRouter) ListenWithContext(ctx context.Context, workers int, queueSize int) {
+	if workers <= 0 {
+		workers = 8
+	}
+	if queueSize <= 0 {
+		queueSize = defaultQueueSize
 	}
 
-	// 创建 HTTP 服务器
-	http.HandleFunc("/bot", r.HandleWebhookRequest)
+	updates := r.Bot.GetUpdatesChan(tgbotapi.UpdateConfig{Offset: 0, Timeout: 60})
 
-	// 启动 HTTPS 服务器
-	if config.CertFile != "" && config.KeyFile != "" {
-		return http.ListenAndServeTLS(config.ListenAddr, config.CertFile, config.KeyFile, nil)
+	jobs := make(chan tgbotapi.Update, queueSize)
+	var wg sync.WaitGroup
+
+	// 启动 worker
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for u := range jobs {
+				uu := u
+				r.HandleUpdate(&uu)
+			}
+		}()
 	}
 
-	// 如果没有证书，使用 HTTP（不推荐用于生产环境）
-	return http.ListenAndServe(config.ListenAddr, nil)
+	// 辅助函数：尝试将 update 安全入队，支持取消和超时
+	enqueue := func(ctx context.Context, u tgbotapi.Update, timeout time.Duration) bool {
+		if timeout <= 0 {
+			select {
+			case jobs <- u:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case jobs <- u:
+			return true
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return false
+		}
+	}
+
+	// 生产者：从 updates 读并写入 jobs
+	produceDone := make(chan struct{})
+	go func() {
+		defer close(produceDone)
+		for {
+			select {
+			case <-ctx.Done():
+				// 外部发起取消：停止接收新更新并尝试把剩余更新 drain 到队列，防止永久阻塞
+				r.Bot.StopReceivingUpdates()
+				// 在 drain 阶段对入队做超时保护，避免当 jobs 已满且 worker 无法消费时阻塞
+				drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				for {
+					select {
+					case u, ok := <-updates:
+						if !ok {
+							return
+						}
+						// 尝试入队，超时则记录并放弃该 update
+						okEnq := enqueue(drainCtx, u, 2*time.Second)
+						if !okEnq {
+							if r.Logger != nil {
+								r.Logger.Printf("drop update during shutdown: %d", u.UpdateID)
+							}
+						}
+					case <-drainCtx.Done():
+						return
+					}
+				}
+			case u, ok := <-updates:
+				if !ok {
+					return
+				}
+				// 尝试将更新入队，遇到外部取消或超时则放弃以避免阻塞生产者
+				select {
+				case jobs <- u:
+				case <-ctx.Done():
+					if r.Logger != nil {
+						r.Logger.Printf("enqueue canceled for update: %d", u.UpdateID)
+					}
+					return
+				}
+			}
+		}
+	}()
+
+	// 等待生产者退出，然后关闭 jobs，等待 worker 处理完队列中所有任务
+	<-produceDone
+	close(jobs)
+	wg.Wait()
 }
 
 // Listen 使用长轮询方式启动机器人
 func (r *TelegramRouter) Listen() {
-	updates := r.Bot.GetUpdatesChan(tgbotapi.UpdateConfig{
-		Offset:  0,
-		Timeout: 60,
-	})
+	updates := r.Bot.GetUpdatesChan(tgbotapi.UpdateConfig{Offset: 0, Timeout: 60})
 	for update := range updates {
-		u := update           // 创建一个副本
-		go r.HandleUpdate(&u) // 异步处理
+		u := update
+		go r.HandleUpdate(&u)
+	}
+}
+
+// Handler 返回 http.Handler，便于集成外部 mux
+func (t *TelegramRouter) Handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.HandleWebhookRequest(w, r)
+	})
+}
+
+// HandleFunc 返回 http.HandlerFunc
+func (t *TelegramRouter) HandleFunc() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		t.HandleWebhookRequest(w, r)
 	}
 }
 
@@ -2294,12 +2880,15 @@ func (t *TelegramRouter) TextRegex(regex *regexp.Regexp, handler HandlerFunc) {
 
 // CommandRegex 注册正则表达式命令处理器
 // 当命令匹配正则表达式时触发
-func (t *TelegramRouter) CommandRegex(regex *regexp.Regexp, handler HandlerFunc) {
-	t.Command("", func(c *Context) {
-		if regex.MatchString(c.Message.Command()) {
-			handler(c)
-		}
+func (t *TelegramRouter) CommandRegex(regex *regexp.Regexp, handlers ...HandlerFunc) {
+	if regex == nil {
+		return
+	}
+	t.commandRegexRoutes = append(t.commandRegexRoutes, &CommandRegexRoute{
+		regex:    regex,
+		handlers: handlers,
 	})
+	t.composedDirty = true
 }
 
 // parseRouteParams 解析路由参数
@@ -2410,225 +2999,113 @@ func (c *Context) ReplyWithQuiz(question string, options []string, correctOption
 // OnGroupChatCreated 注册群组聊天创建处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnGroupChatCreated(handlers ...HandlerFunc) {
-	t.groupChatCreatedHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.groupChatCreatedHandlers = append(t.groupChatCreatedHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnSupergroupChatCreated 注册超级群组聊天创建处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnSupergroupChatCreated(handlers ...HandlerFunc) {
-	t.supergroupChatCreatedHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.supergroupChatCreatedHandlers = append(t.supergroupChatCreatedHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnChannelChatCreated 注册频道聊天创建处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnChannelChatCreated(handlers ...HandlerFunc) {
-	t.channelChatCreatedHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.channelChatCreatedHandlers = append(t.channelChatCreatedHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnNewChatMembers 注册新聊天成员处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnNewChatMembers(handlers ...HandlerFunc) {
-	t.newChatMembersHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.newChatMembersHandlers = append(t.newChatMembersHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnLeftChatMember 注册离开聊天成员处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnLeftChatMember(handlers ...HandlerFunc) {
-	t.leftChatMemberHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.leftChatMemberHandlers = append(t.leftChatMemberHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnNewChatTitle 注册新聊天标题处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnNewChatTitle(handlers ...HandlerFunc) {
-	t.newChatTitleHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.newChatTitleHandlers = append(t.newChatTitleHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnNewChatPhoto 注册新聊天照片处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnNewChatPhoto(handlers ...HandlerFunc) {
-	t.newChatPhotoHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.newChatPhotoHandlers = append(t.newChatPhotoHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnDeleteChatPhoto 注册删除聊天照片处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnDeleteChatPhoto(handlers ...HandlerFunc) {
-	t.deleteChatPhotoHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.deleteChatPhotoHandlers = append(t.deleteChatPhotoHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnEditedMessage 注册编辑后的消息处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnEditedMessage(handlers ...HandlerFunc) {
-	t.editedMessageHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.editedMessageHandlers = append(t.editedMessageHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnEditedChannelPost 注册编辑后的频道消息处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnEditedChannelPost(handlers ...HandlerFunc) {
-	t.editedChannelPostHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.editedChannelPostHandlers = append(t.editedChannelPostHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnMyChatMember 注册我的聊天成员更新处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnMyChatMember(handlers ...HandlerFunc) {
-	t.myChatMemberHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.myChatMemberHandlers = append(t.myChatMemberHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnChatMember 注册聊天成员更新处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnChatMember(handlers ...HandlerFunc) {
-	t.chatMemberHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.chatMemberHandlers = append(t.chatMemberHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnPollAnswer 注册投票答案处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnPollAnswer(handlers ...HandlerFunc) {
-	t.pollAnswerHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.pollAnswerHandlers = append(t.pollAnswerHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnPreCheckoutQuery 注册预结账查询处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnPreCheckoutQuery(handlers ...HandlerFunc) {
-	t.preCheckoutQueryHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.preCheckoutQueryHandlers = append(t.preCheckoutQueryHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnShippingQuery 注册运费查询处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnShippingQuery(handlers ...HandlerFunc) {
-	t.shippingQueryHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.shippingQueryHandlers = append(t.shippingQueryHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnSuccessfulPayment 注册成功支付处理函数。
 // 可以一次注册多个处理函数，它们会按顺序执行，直到被中断。
 func (t *TelegramRouter) OnSuccessfulPayment(handlers ...HandlerFunc) {
-	t.successfulPaymentHandler = func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
-		chain = append(chain, handlers...)
-		c.handlers = chain
-		c.index = -1
-		c.Next()
-	}
+	t.successfulPaymentHandlers = append(t.successfulPaymentHandlers, handlers...)
+	t.composedDirty = true
 }
 
 // OnUpdate 注册通用更新处理函数
@@ -2639,13 +3116,69 @@ func (t *TelegramRouter) OnSuccessfulPayment(handlers ...HandlerFunc) {
 // - 所有类型的频道消息
 // - 所有类型的支付相关更新
 func (t *TelegramRouter) OnUpdate(handlers ...HandlerFunc) {
+	t.mu.Lock()
 	t.updateHandlers = append(t.updateHandlers, func(c *Context) {
-		// 创建一个新的处理链，包含所有中间件和处理器
-		chain := make([]HandlerFunc, 0, len(t.middlewares)+len(handlers))
-		chain = append(chain, t.middlewares...)
+		// 读取中间件快照，避免运行时并发修改
+		t.mu.RLock()
+		mws := make([]HandlerFunc, len(t.middlewares))
+		copy(mws, t.middlewares)
+		t.mu.RUnlock()
+		chain := make([]HandlerFunc, 0, len(mws)+len(handlers))
+		chain = append(chain, mws...)
 		chain = append(chain, handlers...)
 		c.handlers = chain
 		c.index = -1
 		c.Next()
 	})
+	t.mu.Unlock()
+}
+
+// Inline 注册与分发
+// OnInlineQuery 注册 InlineQuery 处理器
+func (t *TelegramRouter) OnInlineQuery(handlers ...HandlerFunc) {
+	t.mu.Lock()
+	t.inlineQueryHandlers = append(t.inlineQueryHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
+}
+
+// OnChosenInlineResult 注册 ChosenInlineResult 处理器
+func (t *TelegramRouter) OnChosenInlineResult(handlers ...HandlerFunc) {
+	t.mu.Lock()
+	t.chosenInlineResultHandlers = append(t.chosenInlineResultHandlers, handlers...)
+	t.composedDirty = true
+	t.mu.Unlock()
+}
+
+// InlineAnswerBuilder 用于回答 inline query
+type InlineAnswerBuilder struct {
+	QueryID string
+	Results []interface{}
+	Options struct {
+		CacheTime  int
+		IsPersonal bool
+		NextOffset string
+	}
+	bot *tgbotapi.BotAPI
+}
+
+func (b *InlineAnswerBuilder) Send() error {
+	cfg := tgbotapi.InlineConfig{
+		InlineQueryID: b.QueryID,
+		IsPersonal:    b.Options.IsPersonal,
+		CacheTime:     b.Options.CacheTime,
+		NextOffset:    b.Options.NextOffset,
+	}
+	// 将 interface 列表透传；调用方需提供 tgbotapi.InlineQueryResultXxx
+	cfg.Results = b.Results
+	_, err := b.bot.Request(cfg)
+	return err
+}
+
+// AnswerInlineQuery 从 Context 构建 InlineAnswerBuilder
+func (c *Context) AnswerInlineQuery() *InlineAnswerBuilder {
+	if c.InlineQuery == nil {
+		return nil
+	}
+	return &InlineAnswerBuilder{QueryID: c.InlineQuery.ID, bot: c.Bot}
 }
