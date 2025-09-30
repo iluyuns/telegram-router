@@ -174,8 +174,10 @@ router.Callback("task/:taskId/do", func(c *tgr.Context) {
 
 如果这个项目对你有帮助，欢迎支持：
 
-![BTC 赞赏](docs/btc.jpeg)
-![微信赞赏](docs/wechat.jpg)
+<div align="center">
+  <img src="docs/btc.jpeg" alt="BTC 赞赏" width="200" />
+  <img src="docs/wechat.jpg" alt="微信赞赏" width="200" />
+</div>
 
 
 

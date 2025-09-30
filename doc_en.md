@@ -117,8 +117,10 @@ router.Callback("order/:orderId/status", func(c *tgr.Context) {
 
 If this project helps you, please consider supporting it:
 
-![BTC Support](docs/btc.jpeg)
-![WeChat Support](docs/wechat.jpg)
+<div align="center">
+  <img src="docs/btc.jpeg" alt="BTC Support" width="200" />
+  <img src="docs/wechat.jpg" alt="WeChat Support" width="200" />
+</div>
 
 
 
