@@ -1,4 +1,4 @@
-module github.com/iluyuns/telegram-router
+module github.com/iluyuns/tgr
 
 go 1.24.3
 
